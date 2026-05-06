@@ -1,6 +1,12 @@
 const STORAGE_KEY = "blue-listening-events-v3";
 const CONVERSATION_KEY = "blue-conversation-v1";
 
+// MicWobble is declared via `function MicWobble` in components.jsx, which puts it
+// on the global scope. We don't redeclare it here — JSX <MicWobble /> resolves
+// to that global at render time. (Redeclaring as `const MicWobble = ...` would
+// throw "Identifier 'MicWobble' has already been declared" at parse time since
+// all three Babel-standalone scripts share one program-level scope.)
+
 const iconPaths = {
   scenery: "M5 21q-.825 0-1.412-.587T3 19V5q0-.825.588-1.412T5 3h14q.825 0 1.413.588T21 5v14q0 .825-.587 1.413T19 21H5Zm1-4h12l-3.75-5-3 4L9 13l-3 4Z",
   movie:
@@ -50,14 +56,18 @@ function loadJson(key, fallback) {
 function saveJson(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
 
 function normalizeTrack(track, source = "Blue") {
+  const rawGenre = track.genre || "Unknown";
+  const bucketed = normalizeGenreClient(rawGenre);
   return {
     id: track.id || `${track.title}-${track.artist}-${Date.now()}`,
     title:  track.title  || "Unknown track",
     artist: track.artist || "Unknown artist",
     band:   track.band   || track.artist || "Unknown artist",
-    genre:  track.genre  || "Unknown",
-    mood:   track.mood   || inferMood(`${track.title||""} ${track.artist||""} ${track.genre||""}`),
+    genre:  bucketed === "Unknown" ? rawGenre : bucketed,
+    mood:   track.mood   || inferMood(`${track.title||""} ${track.artist||""} ${rawGenre}`),
     query:  track.query  || `${track.title||""} ${track.artist||""}`.trim(),
+    uri:    track.uri    || "",
+    previewUrl: track.previewUrl || "",
     source,
     playedAt: track.playedAt || new Date().toISOString(),
   };
@@ -65,12 +75,46 @@ function normalizeTrack(track, source = "Blue") {
 
 function inferMood(text) {
   const v = text.toLowerCase();
-  if (/rock|guitar|hype|drive|gym|electric|party/.test(v)) return "Electric";
-  if (/night|dark|late|505/.test(v))                        return "Late Night";
-  if (/work|focus|study|code/.test(v))                      return "Focused";
-  if (/sad|deep|remember|miss|emotional|parindey/.test(v))  return "Reflective";
-  if (/calm|peace|soft|kun|sufi/.test(v))                   return "Calm";
+  if (/rock|guitar|hype|drive|gym|electric|party|loud|rage|metal/.test(v)) return "Electric";
+  if (/night|dark|late|505|midnight|2am|3am/.test(v))                        return "Late Night";
+  if (/work|focus|study|code|grind|lock in/.test(v))                          return "Focused";
+  if (/sad|deep|remember|miss|emotional|parindey|nostalg|melanchol/.test(v)) return "Reflective";
+  if (/calm|peace|soft|kun|sufi|ambient|meditat/.test(v))                    return "Calm";
   return "Chill";
+}
+
+// Mirror of server's GENRE_BUCKETS so the dashboard chart re-buckets legacy events
+// stored in localStorage and any source that didn't go through the server normalizer.
+const GENRE_BUCKETS_CLIENT = [
+  ["Hip-Hop",   /\b(hip[\s-]?hop|rap|trap|drill|grime|boom bap)\b/],
+  ["Bollywood", /\b(bollywood|filmi|hindi|desi|punjabi|bhangra|mumbai)\b/],
+  ["Sufi",      /\b(sufi|qawwali|ghazal)\b/],
+  ["K-Pop",     /\bk[\s-]?pop\b/],
+  ["J-Pop",     /\bj[\s-]?pop\b/],
+  ["Latin",     /\b(reggaeton|salsa|latin|bachata|cumbia|samba|bossa nova)\b/],
+  ["Reggae",    /\b(reggae|dub|ska|dancehall)\b/],
+  ["Metal",     /\b(metal|metalcore|deathcore|djent)\b/],
+  ["Punk",      /\b(punk|hardcore|emo|screamo)\b/],
+  ["R&B",       /\b(r&b|rnb|soul|neo[\s-]?soul|funk|motown)\b/],
+  ["Electronic",/\b(edm|house|techno|dubstep|trance|electronic|electronica|drum and bass|dnb|garage|breakbeat|idm|future bass|electro|synthwave|synth pop|synth-pop|synthpop)\b/],
+  ["Jazz",      /\b(jazz|bebop|swing|bossa|fusion)\b/],
+  ["Classical", /\b(classical|opera|baroque|orchestra|symphony|chamber)\b/],
+  ["Country",   /\b(country|honky tonk|nashville)\b/],
+  ["Folk",      /\b(folk|americana|bluegrass|singer[\s-]?songwriter)\b/],
+  ["Indie",     /\b(indie|bedroom pop|lo[\s-]?fi|chillwave|dream pop|shoegaze|psychedelic pop)\b/],
+  ["Pop",       /\b(pop|disco|new wave)\b/],
+  ["Rock",      /\b(rock|grunge|britpop|post[\s-]?rock|psych|garage rock|stoner|alt|alternative)\b/],
+];
+
+function normalizeGenreClient(raw) {
+  if (!raw) return "Unknown";
+  const known = new Set(["Hip-Hop","Bollywood","Sufi","K-Pop","J-Pop","Latin","Reggae","Metal","Punk","R&B","Electronic","Jazz","Classical","Country","Folk","Indie","Pop","Rock","Other","Unknown"]);
+  if (known.has(raw)) return raw;
+  const lower = String(raw).toLowerCase();
+  for (const [bucket, re] of GENRE_BUCKETS_CLIENT) {
+    if (re.test(lower)) return bucket;
+  }
+  return "Other";
 }
 
 function countBy(events, key) {
@@ -95,14 +139,26 @@ function pickRecommendation(mood, events) {
 }
 function chooseBlueVoice(voices=[]) {
   const usable = voices.filter((v)=>/^en/i.test(v.lang||""));
-  for (const name of ["Microsoft Aria","Microsoft Guy","Microsoft Jenny","Google US English","Microsoft David","Microsoft Zira"]) {
+  // Prefer neural / natural voices first — they handle contractions and pacing far better.
+  const neural = usable.find((v)=>/natural|neural|online|premium/i.test(v.name||""));
+  if (neural) return neural;
+  for (const name of ["Microsoft Aria","Google UK English Female","Microsoft Jenny","Microsoft Guy","Google US English","Microsoft Zira","Microsoft David"]) {
     const found = usable.find((v)=>v.name.includes(name));
     if (found) return found;
   }
-  return usable.find((v)=>/natural|online|neural/i.test(v.name))||usable[0]||voices[0]||null;
+  return usable[0]||voices[0]||null;
 }
 function makeSpeechText(text="") {
-  return String(text).replace(/\bAyush\b/g,"Ayush,").replace(/\s+/g," ").replace(/([.!?])\s+/g,"$1 ").trim();
+  return String(text)
+    // Light, human-feeling punctuation pacing — no forced "Ayush," after every name
+    .replace(/\bI am\b/g, "I'm")
+    .replace(/\bI will\b/g, "I'll")
+    .replace(/\byou are\b/gi, "you're")
+    .replace(/\bdo not\b/gi, "don't")
+    .replace(/\bcan not\b/gi, "can't")
+    .replace(/\s+/g, " ")
+    .replace(/([.!?])\s+/g, "$1 ")
+    .trim();
 }
 
 /* ── App ─────────────────────────────────────────────────────────────────── */
@@ -116,6 +172,12 @@ function App() {
   const [listening,    setListening]    = React.useState(false);
   const [busy,         setBusy]         = React.useState(false);
   const [voices,       setVoices]       = React.useState(()=>("speechSynthesis" in window ? window.speechSynthesis.getVoices() : []));
+  // Live-playback state — server polls every few seconds; the player extrapolates
+  // locally between syncs using requestAnimationFrame, so visible progress and
+  // lyric highlighting stay smooth without thrashing React state.
+  const [playback,     setPlayback]     = React.useState({progressMs:0,durationMs:0,isPlaying:false,lastSyncAt:0});
+  const [lyrics,       setLyrics]       = React.useState({loading:false,synced:false,lines:[],plain:""});
+  const lyricsCacheRef = React.useRef(new Map());
   const recommendation = React.useMemo(()=>pickRecommendation(mood,events),[mood,events]);
 
   React.useEffect(()=>saveJson(STORAGE_KEY,events),[events]);
@@ -154,34 +216,100 @@ function App() {
       try { setBridge(await fetch("/api/health").then(r=>r.json())); }
       catch { setBridge({ok:false,llm:"ollama",llmOnline:false,spotify:false,mediaKeys:false}); }
     };
-    const pollSpotify = async()=>{
+    const pollRecent = async()=>{
       try {
         const recent = await fetch("/api/spotify/recent").then(r=>r.ok?r.json():null);
         if (recent?.events?.length) setEvents(old=>mergeEvents(old,recent.events.map(e=>normalizeTrack(e,"Spotify"))));
+      } catch {}
+    };
+    // Tighter cadence on /current so progressMs stays in sync with playback.
+    // Local rAF interpolation fills the gaps between polls, so visible lag
+    // is bounded by ~one frame, not the poll interval.
+    const pollCurrent = async()=>{
+      try {
         const current = await fetch("/api/spotify/current").then(r=>r.ok?r.json():null);
-        if (current?.track) {
-          const n = normalizeTrack(current.track,"Spotify");
+        if (!current) return;
+        if (current.track) {
+          const n = normalizeTrack({...current.track, durationMs: current.durationMs}, "Spotify");
+          // Carry through fields the normalizer doesn't whitelist.
+          n.albumArt      = current.track.albumArt      || "";
+          n.albumArtSmall = current.track.albumArtSmall || n.albumArt;
+          n.durationMs    = current.durationMs || current.track.durationMs || 0;
           setCurrentTrack(n);
+          setPlayback({
+            progressMs: current.progressMs || 0,
+            durationMs: current.durationMs || 0,
+            isPlaying:  !!current.isPlaying,
+            lastSyncAt: performance.now(),
+          });
           if (current.isPlaying) setEvents(old=>mergeEvents(old,[n]));
+        } else {
+          setPlayback((p)=>({...p, isPlaying:false}));
         }
       } catch {}
     };
-    pollBridge(); pollSpotify();
+    pollBridge(); pollRecent(); pollCurrent();
     const bi = setInterval(pollBridge,30000);
-    const si = setInterval(pollSpotify,15000);
-    return ()=>{ clearInterval(bi); clearInterval(si); };
+    const ri = setInterval(pollRecent, 30000);
+    const ci = setInterval(pollCurrent, 4000);
+    return ()=>{ clearInterval(bi); clearInterval(ri); clearInterval(ci); };
   },[]);
+
+  // Lyrics fetcher — keyed on title+artist so it only fires when the track
+  // actually changes, not on every poll tick. Per-track cache prevents
+  // re-fetching on replays and song-skip-back scenarios.
+  const trackKey = currentTrack ? `${currentTrack.title}|${currentTrack.artist}`.toLowerCase() : "";
+  React.useEffect(()=>{
+    if (!currentTrack?.title || !currentTrack?.artist) {
+      setLyrics({loading:false,synced:false,lines:[],plain:""});
+      return undefined;
+    }
+    const cache = lyricsCacheRef.current;
+    if (cache.has(trackKey)) {
+      setLyrics(cache.get(trackKey));
+      return undefined;
+    }
+    let cancelled = false;
+    setLyrics({loading:true,synced:false,lines:[],plain:""});
+    const params = new URLSearchParams({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+    });
+    if (currentTrack.album)      params.set("album",    currentTrack.album);
+    if (currentTrack.durationMs) params.set("duration", String(currentTrack.durationMs));
+    fetch(`/api/lyrics?${params}`)
+      .then((r)=>r.json())
+      .then((data)=>{
+        if (cancelled) return;
+        const result = {
+          loading: false,
+          synced:  !!data.synced,
+          lines:   Array.isArray(data.lines) ? data.lines : [],
+          plain:   data.plain || "",
+        };
+        cache.set(trackKey, result);
+        setLyrics(result);
+      })
+      .catch(()=>{
+        if (cancelled) return;
+        setLyrics({loading:false,synced:false,lines:[],plain:""});
+      });
+    return ()=>{ cancelled = true; };
+  },[trackKey]);
 
   const stats = React.useMemo(()=>{
     const plays = events.length;
+    // Re-bucket every event's genre for the chart so legacy localStorage entries
+    // and any "Unknown" leakage get folded into canonical buckets at display time.
+    const bucketed = events.map((e)=>({...e,genre:normalizeGenreClient(e.genre||"Unknown")}));
     return {
       plays,
-      topGenre:  topOf(events,"genre"),
+      topGenre:  topOf(bucketed,"genre"),
       topSong:   topOf(events,"title"),
       topArtist: topOf(events,"artist"),
       topBand:   topOf(events,"band"),
       moodData:  countBy(events,"mood"),
-      genreData: countBy(events,"genre"),
+      genreData: countBy(bucketed,"genre"),
       artistData:countBy(events,"artist"),
     };
   },[events]);
@@ -192,43 +320,116 @@ function App() {
     setEvents(old=>mergeEvents(old,[n]));
   };
 
+  const previewAudioRef = React.useRef(null);
+
   const speak = (text)=>{
     if (!("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(makeSpeechText(text));
     const v = chooseBlueVoice(voices);
     if (v) u.voice = v;
-    u.lang = v?.lang||"en-US"; u.rate=1.06; u.pitch=0.94; u.volume=0.92;
+    u.lang = v?.lang||"en-US";
+    // Slightly slower, gentler pitch — reads less robotic.
+    u.rate = 0.98;
+    u.pitch = 0.96;
+    u.volume = 0.94;
     window.speechSynthesis.speak(u);
   };
 
+  const playPreview = (url, track) => {
+    if (!url) return false;
+    let el = previewAudioRef.current;
+    if (!el) {
+      el = document.createElement("audio");
+      el.crossOrigin = "anonymous";
+      el.preload = "auto";
+      el.style.display = "none";
+      document.body.appendChild(el);
+      previewAudioRef.current = el;
+    }
+    el.src = url;
+    el.volume = 0.85;
+    el.play().catch(()=>{});
+    return true;
+  };
+
+  // Direct, in-app playback. Tries Spotify first; falls back to a 30s preview
+  // so the user is NEVER bounced to the Spotify search page.
   const playTrack = async(track)=>{
-    recordPlay(track,bridge.spotify?"Spotify":"Blue local");
-    const query = track.query||`${track.title} ${track.artist}`;
+    const query = (track && (track.query || `${track.title||""} ${track.artist||""}`.trim())) || recommendation.query;
+    if (!query) return;
     try {
-      const r = await fetch("/api/spotify/play",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query})}).then(r=>r.json());
-      if (r.ok&&r.track) recordPlay(r.track,"Spotify");
-      if (!r.ok) window.open(`https://open.spotify.com/search/${encodeURIComponent(query)}`,"_blank","noopener");
-    } catch { window.open(`https://open.spotify.com/search/${encodeURIComponent(query)}`,"_blank","noopener"); }
+      const r = await fetch("/api/spotify/play",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({query, uri: track?.uri || undefined}),
+      }).then(r=>r.json());
+
+      if (r.ok && r.track) {
+        recordPlay(r.track,"Spotify");
+        return { ok: true, mode: "spotify", device: r.device };
+      }
+
+      // Spotify couldn't play (no device, no premium, etc). Use the preview audio.
+      if (r.previewUrl) {
+        const t = r.track || track;
+        if (t) recordPlay({...t, source:"Preview"}, "Preview");
+        playPreview(r.previewUrl, t);
+        const note = `No active Spotify device, so I'm running a 30-second preview here. Open Spotify on a device for the full track.`;
+        setMessages(old=>[...old,{role:"blue",text:note}]);
+        speak(note);
+        return { ok: true, mode: "preview" };
+      }
+
+      const note = r.error || "I couldn't start playback. Open Spotify on a device and I'll route through it.";
+      setMessages(old=>[...old,{role:"blue",text:note}]);
+      speak(note);
+      return { ok: false };
+    } catch {
+      const note = "Lost the bridge to Spotify. Reconnect from the Connect button up top and try again.";
+      setMessages(old=>[...old,{role:"blue",text:note}]);
+      speak(note);
+      return { ok: false };
+    }
   };
 
   const sendToBlue = async(rawText=input)=>{
     const text = rawText.trim();
     if (!text||busy) return;
     setBusy(true); setInput("");
-    setMessages(old=>[...old,{role:"user",text}]);
+    const userMsg = {role:"user",text};
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
     try {
-      const r = await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:text,context:{mood,recommendation,currentTrack,topGenre:stats.topGenre,topArtist:stats.topArtist,recent:events.slice(0,12)}})}).then(r=>r.json());
+      const r = await fetch("/api/chat",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          message: text,
+          history: nextMessages.slice(-8),
+          context: {
+            mood, recommendation, currentTrack,
+            topGenre: stats.topGenre, topArtist: stats.topArtist,
+            recent: events.slice(0,12),
+          },
+        }),
+      }).then(r=>r.json());
       const nextMood = r.mood||inferMood(text);
       setMood(nextMood);
-      const reply = r.reply||`For ${nextMood}, I would play ${recommendation.title} next.`;
+      const reply = r.reply||`For ${nextMood.toLowerCase()}, I'd put on ${recommendation.title}. Want it?`;
       setMessages(old=>[...old,{role:"blue",text:reply}]);
       speak(reply);
-      if (r.action==="play"||/play|start|queue/i.test(text)) {
-        await playTrack(r.track||{...recommendation,title:r.playQuery||recommendation.title,query:r.playQuery||recommendation.query});
+      if (r.action==="play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text)) {
+        // Prefer the model's chosen track, else current track when user said "play this", else recommendation.
+        const sayingThis = /\b(this|that|it)\b/i.test(text);
+        const target =
+          (r.track && (r.track.title || r.track.query) ? r.track : null) ||
+          (sayingThis && currentTrack ? currentTrack : null) ||
+          { ...recommendation, title: r.playQuery || recommendation.title, query: r.playQuery || recommendation.query };
+        await playTrack(target);
       }
     } catch {
-      const reply=`I am in local mode. For ${mood}, I recommend ${recommendation.title} by ${recommendation.artist}. Want me to play it next?`;
+      const reply = `Running in local mode. For ${mood.toLowerCase()}, I'd play ${recommendation.title} by ${recommendation.artist}. Want it?`;
       setMessages(old=>[...old,{role:"blue",text:reply}]);
       speak(reply);
     } finally { setBusy(false); }
@@ -256,7 +457,17 @@ function App() {
       {/* Black overlay — GSAP fades this out on load */}
       <div id="page-load-overlay" style={{position:"fixed",inset:0,zIndex:9999,background:"#000",pointerEvents:"none"}} />
 
-      <main className="bg-black text-white">
+      {/* ── Music Cosmos: live, fixed, music-themed background system ──────
+          Layered in source order so each subsequent layer paints over the
+          last while staying behind <main> (z-index:1+). All layers are
+          aria-hidden and pointer-events:none so they never interfere with
+          clicks, focus, scroll, or screen readers. */}
+      <AuroraGradient />
+      <MusicCosmos variant="site" />
+      <MusicNotesLayer count={14} variant="site" />
+
+
+      <main className="relative z-[1] text-white">
         <Navbar bridge={bridge} />
         <Hero
           stats={stats} recommendation={recommendation} bridge={bridge}
@@ -267,6 +478,7 @@ function App() {
           input={input} setInput={setInput} mood={mood} setMood={setMood}
           recommendation={recommendation} currentTrack={currentTrack} bridge={bridge}
           busy={busy} listening={listening}
+          playback={playback} lyrics={lyrics}
           onSubmit={()=>sendToBlue()} onVoice={startVoice}
           onPlay={()=>playTrack(recommendation)} onMedia={mediaKey}
         />
@@ -297,9 +509,8 @@ function Navbar({ bridge }) {
 /* ── Hero ────────────────────────────────────────────────────────────────── */
 function Hero({ stats, recommendation, bridge, onVoice, onRecommend, onPlay }) {
   return (
-    <section id="hero" className="relative flex min-h-screen overflow-hidden bg-black">
-      <FadingVideo src={window.BLUE_VIDEOS.hero} className="absolute left-1/2 top-0 z-0 -translate-x-1/2 object-cover object-top" style={{width:"120%",height:"120%"}} />
-      <ParticleWaveCanvas style={{opacity:0.45,zIndex:1}} />
+    <section id="hero" className="relative flex min-h-screen overflow-hidden">
+      <HeroAccent />
       <div className="relative z-10 flex min-h-screen w-full flex-col">
         <div className="flex flex-1 flex-col items-center justify-center px-4 pt-24 text-center">
 
@@ -361,8 +572,8 @@ function Capabilities(props) {
   ];
 
   return (
-    <section id="capabilities" className="relative min-h-screen overflow-hidden bg-black">
-      <FadingVideo src={window.BLUE_VIDEOS.capabilities} className="absolute inset-0 z-0 h-full w-full object-cover" />
+    <section id="capabilities" className="relative min-h-screen overflow-hidden">
+      <DashboardAccent />
       <div className="relative z-10 flex min-h-screen flex-col px-8 pb-10 pt-24 md:px-16 lg:px-20">
         <header className="mb-auto">
           <p data-reveal className="mb-6 font-body text-sm font-semibold" style={{color:"#FFE44D"}}>// Capabilities</p>
@@ -404,10 +615,23 @@ function CapabilityCard({ card, index }) {
 }
 
 /* ── Dashboard panel ─────────────────────────────────────────────────────── */
-function DashboardPanel({ stats, events, messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, onSubmit, onVoice, onPlay, onMedia }) {
+function DashboardPanel({ stats, events, messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, playback, lyrics, onSubmit, onVoice, onPlay, onMedia }) {
   return (
     <div id="dashboard" className="dashboard-stage mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[1fr_460px]">
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+
+        <div className="lg:col-span-2">
+          <LiveMusicPlayer
+            track={currentTrack}
+            lyrics={lyrics}
+            playback={playback}
+            isPlaying={playback?.isPlaying}
+            bridge={bridge}
+            onPlay={onPlay}
+            onPause={()=>onMedia("playpause")}
+            onNext={()=>onMedia("next")}
+          />
+        </div>
 
         <div data-reveal><DonutChart title="Mood listening split" data={stats.moodData} /></div>
         <div data-reveal><DonutChart title="Genre listening split" data={stats.genreData} /></div>
@@ -474,8 +698,7 @@ function AgentConsole({ messages, input, setInput, mood, setMood, recommendation
 
   return (
     <section id="blue-agent" data-reveal className="agent-shell relative overflow-hidden rounded-[1.25rem]" data-tilt="card">
-      <ParticleWaveCanvas />
-      <div className="relative z-10 flex flex-col p-5" style={{minHeight:700}}>
+      <div className="relative z-10 flex flex-1 flex-col p-5" style={{minHeight:700}}>
 
         {/* ── Header ── */}
         <AgentHeader bridge={bridge} listening={listening} />
@@ -501,8 +724,11 @@ function AgentConsole({ messages, input, setInput, mood, setMood, recommendation
 
         <div className="agent-divider mt-4" />
 
-        {/* ── Messages ── */}
-        <div ref={messagesRef} className="agent-messages flex flex-1 flex-col gap-3 overflow-y-auto pr-1" style={{minHeight:200,maxHeight:260}}>
+        {/* ── Messages — flex-1 so they expand to fill the panel and remove
+            the blank black area below the chat. min-height keeps the list
+            readable when the dashboard stack is shorter; no max so the
+            list absorbs extra height on tall layouts. ── */}
+        <div ref={messagesRef} className="agent-messages flex flex-1 flex-col gap-3 overflow-y-auto pr-1" style={{minHeight:200}}>
           {messages.slice(-12).map((msg,i)=>(
             <MessageBubble key={`${msg.role}-${i}`} message={msg} />
           ))}
@@ -628,16 +854,18 @@ function ChatInputBar({ input, setInput, busy, listening, onSubmit, onVoice }) {
           placeholder="Tell Blue your mood or ask for a song…"
           className="chat-input min-w-0 flex-1 bg-transparent py-1.5 font-body text-sm text-white placeholder:text-white/30"
         />
-        {/* Mic */}
+        {/* Mic — listening state shows the dispersed-pixel wobble in place of a static ring */}
         <button
           type="button"
           onClick={onVoice}
           title="Voice input"
-          className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-all duration-200 ${listening?"text-black":"alive-button liquid-glass text-white"}`}
-          style={listening?{background:"#FFE44D"}:{}}
+          aria-label={listening ? "Stop voice input" : "Start voice input"}
+          className={`mic-btn relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-all duration-200 ${listening?"mic-btn--listening":"alive-button liquid-glass text-white"}`}
         >
-          {listening && <span className="absolute inset-0 animate-ping rounded-full" style={{background:"rgba(255,228,77,0.25)"}} />}
-          <MicIcon />
+          {listening && <MicWobble active={listening} />}
+          <span className={`relative z-10 flex items-center justify-center ${listening?"text-black":""}`}>
+            <MicIcon />
+          </span>
         </button>
         {/* Send */}
         <button
@@ -654,7 +882,7 @@ function ChatInputBar({ input, setInput, busy, listening, onSubmit, onVoice }) {
         </button>
       </div>
       {listening && (
-        <p className="mt-2 text-center font-body text-xs" style={{color:"rgba(255,228,77,0.8)"}}>
+        <p className="mt-2 text-center font-body text-xs" style={{color:"rgba(255,228,77,0.85)"}}>
           Listening… speak now
         </p>
       )}
