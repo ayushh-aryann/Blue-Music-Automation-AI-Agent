@@ -1,0 +1,467 @@
+html {
+  background: #000;
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  overflow-x: hidden;
+  background: #000;
+  color: #fff;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+#hero,
+#blue-agent,
+#automation,
+#dashboard {
+  scroll-margin-top: 110px;
+}
+
+/* ── GSAP initial hidden state ─────────────────────── */
+/* Only apply pre-animation state until GSAP marks the element as revealed.
+   transition:none prevents CSS transitions (e.g. .tilt-card transform 180ms)
+   from firing while GSAP is mutating transform/filter every frame, which would
+   otherwise leave the element stuck mid-interpolation after the tween ends. */
+[data-reveal]:not([data-revealed]) {
+  opacity: 0;
+  filter: blur(18px);
+  will-change: opacity, transform, filter;
+  transition: none !important;
+}
+
+[data-hero]:not([data-revealed]) {
+  opacity: 0;
+  will-change: opacity, transform, filter;
+  transition: none !important;
+}
+
+.blur-word:not([data-revealed]) {
+  opacity: 0;
+  filter: blur(20px);
+  will-change: opacity, transform, filter;
+  transition: none !important;
+}
+
+/* ── Video / Canvas ────────────────────────────────── */
+.fading-video {
+  pointer-events: none;
+  opacity: 0;
+  will-change: opacity;
+  backface-visibility: hidden;
+}
+
+.neural-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.82;
+}
+
+/* ── Logo ──────────────────────────────────────────── */
+.logo-link {
+  display: inline-flex;
+  text-decoration: none;
+}
+
+.blue-wordmark {
+  --mark-size: 112px;
+  position: relative;
+  display: inline-flex;
+  min-width: var(--mark-size);
+  height: 56px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #fff;
+  isolation: isolate;
+  text-decoration: none;
+}
+
+.blue-wordmark-compact {
+  --mark-size: 92px;
+  height: 50px;
+  flex: 0 0 auto;
+}
+
+.blue-wordmark::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at var(--glow-x, 34%) var(--glow-y, 40%), rgba(255, 255, 255, 0.22), transparent 38%),
+    rgba(255, 255, 255, 0.035);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.26),
+    0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 18px 50px rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.blue-wordmark::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  opacity: 0.75;
+  animation: logoBreath 3.8s ease-in-out infinite;
+}
+
+.blue-wordmark-text {
+  position: relative;
+  z-index: 2;
+  font-family: "Syne", system-ui, sans-serif;
+  font-size: 2rem;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  text-shadow:
+    0 0 14px rgba(255, 255, 255, 0.36),
+    0 10px 30px rgba(0, 0, 0, 0.38);
+}
+
+.blue-wordmark-compact .blue-wordmark-text {
+  font-size: 1.75rem;
+}
+
+.blue-wordmark-orbit,
+.blue-wordmark-spark {
+  position: absolute;
+  z-index: 1;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.blue-wordmark-orbit {
+  inset: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  transform: rotate(-8deg);
+  animation: logoOrbit 6s linear infinite;
+}
+
+.blue-wordmark-spark {
+  right: 16px;
+  top: 13px;
+  width: 6px;
+  height: 6px;
+  background: #fff;
+  box-shadow:
+    0 0 18px #fff,
+    -45px 18px 0 rgba(255, 255, 255, 0.45),
+    -20px -6px 0 rgba(255, 255, 255, 0.32);
+  animation: logoSpark 2.2s ease-in-out infinite;
+}
+
+/* ── Nav / buttons / cards ─────────────────────────── */
+.nav-pill {
+  transform-style: preserve-3d;
+  animation: navFloat 8s ease-in-out infinite;
+}
+
+.alive-button,
+.tilt-card {
+  --tilt-rx: 0deg;
+  --tilt-ry: 0deg;
+  --tilt-tz: 0px;
+  --glow-x: 50%;
+  --glow-y: 50%;
+  position: relative;
+  transform-style: preserve-3d;
+  transform: perspective(900px) rotateX(var(--tilt-rx)) rotateY(var(--tilt-ry)) translateZ(var(--tilt-tz));
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease,
+    color 180ms ease,
+    opacity 180ms ease;
+  will-change: transform;
+}
+
+.alive-button::after,
+.tilt-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(circle at var(--glow-x) var(--glow-y), rgba(255, 255, 255, 0.22), transparent 34%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.alive-button:hover,
+.tilt-card:hover,
+.alive-button.is-tilting,
+.tilt-card.is-tilting {
+  box-shadow:
+    0 22px 70px rgba(255, 255, 255, 0.12),
+    0 8px 28px rgba(0, 0, 0, 0.35),
+    inset 0 1px 1px rgba(255, 255, 255, 0.18);
+}
+
+.alive-button:hover::after,
+.tilt-card:hover::after,
+.alive-button.is-tilting::after,
+.tilt-card.is-tilting::after {
+  opacity: 1;
+}
+
+.alive-button:active {
+  transform: perspective(900px) rotateX(var(--tilt-rx)) rotateY(var(--tilt-ry)) translateZ(4px) scale(0.96);
+}
+
+.primary-live {
+  box-shadow:
+    0 12px 32px rgba(255, 255, 255, 0.22),
+    inset 0 -8px 18px rgba(0, 0, 0, 0.1);
+}
+
+.stat-card,
+.capability-card,
+.dashboard-card,
+.agent-shell {
+  animation: cardDrift 8s ease-in-out infinite;
+}
+
+.capability-card:nth-child(2),
+.dashboard-card:nth-child(2) {
+  animation-delay: -2s;
+}
+
+.capability-card:nth-child(3),
+.dashboard-card:nth-child(3) {
+  animation-delay: -4s;
+}
+
+.dashboard-stage {
+  perspective: 1200px;
+}
+
+.dashboard-card {
+  min-height: 250px;
+}
+
+.dashboard-card svg {
+  transform: translateZ(30px);
+  animation: chartHover 5.5s ease-in-out infinite;
+}
+
+.dashboard-card .legend-list,
+.dashboard-card p,
+.dashboard-card .grid {
+  position: relative;
+  z-index: 1;
+}
+
+.signal-row {
+  background: rgba(255, 255, 255, 0.035);
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    background 180ms ease;
+}
+
+.signal-row:hover {
+  border-color: rgba(255, 255, 255, 0.26);
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateX(6px);
+}
+
+.agent-messages {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.agent-messages::-webkit-scrollbar {
+  width: 4px;
+}
+
+.agent-messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+}
+
+.donut-path {
+  filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.16));
+}
+
+.status-dot {
+  box-shadow: 0 0 18px currentColor;
+}
+
+.audio-pulse span {
+  display: block;
+  width: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: audioRise 1.2s ease-in-out infinite;
+}
+
+.audio-pulse span:nth-child(2) { animation-delay: 0.15s; }
+.audio-pulse span:nth-child(3) { animation-delay: 0.3s; }
+.audio-pulse span:nth-child(4) { animation-delay: 0.45s; }
+
+/* ── Agent console ─────────────────────────────────── */
+.agent-shell {
+  background: rgba(5, 5, 8, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+
+.agent-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.07);
+  margin: 12px 0;
+}
+
+/* Typing indicator */
+.typing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.5);
+  display: block;
+  animation: typingBounce 1.4s ease-in-out infinite;
+}
+
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* Voice active rings */
+.voice-ring {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  animation: voicePing 1.3s ease-out infinite;
+  pointer-events: none;
+}
+
+.voice-ring:nth-child(2) {
+  inset: -13px;
+  animation-delay: 0.45s;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* Waveform bars (now-playing widget) */
+.waveform-bars span {
+  display: block;
+  width: 3px;
+  border-radius: 2px;
+  background: #FFE44D;
+  min-height: 4px;
+  animation: waveBar 0.75s ease-in-out infinite alternate;
+}
+
+.waveform-bars span:nth-child(1) { animation-delay: 0.00s; height: 10px; }
+.waveform-bars span:nth-child(2) { animation-delay: 0.10s; height: 16px; }
+.waveform-bars span:nth-child(3) { animation-delay: 0.20s; height: 22px; }
+.waveform-bars span:nth-child(4) { animation-delay: 0.14s; height: 14px; }
+.waveform-bars span:nth-child(5) { animation-delay: 0.06s; height: 8px;  }
+
+/* Chat input focus glow */
+.chat-input:focus {
+  outline: none;
+}
+
+.chat-input-wrap:focus-within {
+  border-color: rgba(255, 255, 255, 0.22) !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 24px rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Message entry animation */
+.msg-enter {
+  animation: msgSlide 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ── Keyframes ─────────────────────────────────────── */
+@keyframes logoBreath {
+  0%, 100% { transform: scale(0.96); opacity: 0.45; }
+  50%       { transform: scale(1.07); opacity: 0.95; }
+}
+
+@keyframes logoOrbit {
+  to { transform: rotate(352deg); }
+}
+
+@keyframes logoSpark {
+  0%, 100% { opacity: 0.55; transform: translate3d(0,0,0) scale(0.9); }
+  50%       { opacity: 1;    transform: translate3d(4px,-2px,18px) scale(1.25); }
+}
+
+@keyframes navFloat {
+  0%, 100% { transform: translateY(0);  }
+  50%       { transform: translateY(3px); }
+}
+
+@keyframes cardDrift {
+  0%, 100% { translate: 0 0;   }
+  50%       { translate: 0 -5px; }
+}
+
+@keyframes chartHover {
+  0%, 100% { transform: translateZ(30px) rotateX(0deg)  rotateY(0deg);  }
+  50%       { transform: translateZ(42px) rotateX(4deg)  rotateY(-5deg); }
+}
+
+@keyframes audioRise {
+  0%, 100% { height: 8px;  opacity: 0.55; }
+  50%       { height: 26px; opacity: 1;    }
+}
+
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0);   opacity: 0.5; }
+  30%            { transform: translateY(-7px); opacity: 1;   }
+}
+
+@keyframes voicePing {
+  0%   { transform: scale(1);   opacity: 0.8; }
+  100% { transform: scale(1.55); opacity: 0;   }
+}
+
+@keyframes waveBar {
+  from { height: 4px;  }
+  to   { height: 20px; }
+}
+
+@keyframes msgSlide {
+  from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0);   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+
+  [data-reveal], [data-hero], .blur-word {
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+    visibility: visible !important;
+  }
+}

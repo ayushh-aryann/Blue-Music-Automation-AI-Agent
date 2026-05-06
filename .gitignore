@@ -1,0 +1,6 @@
+.env
+.blue-state.json
+.blue-server.*.log
+.chrome-profile-blue/
+.edge-profile-blue/
+node_modules/
