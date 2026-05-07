@@ -30,6 +30,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, BASE_URL);
 
+    // ── Existing endpoints (preserved) ───────────────────────────────────
     if (url.pathname === "/api/health") return json(res, await health());
     if (url.pathname === "/api/chat" && req.method === "POST") return chat(req, res);
     if (url.pathname === "/api/system/media" && req.method === "POST") return mediaKey(req, res);
@@ -39,6 +40,36 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/spotify/recent") return spotifyRecent(res);
     if (url.pathname === "/api/spotify/play" && req.method === "POST") return spotifyPlay(req, res);
     if (url.pathname === "/api/lyrics") return lyrics(url, res);
+
+    // ── New endpoints ─────────────────────────────────────────────────────
+    // Streaming chat with optional tool-calling agent loop
+    if (url.pathname === "/api/chat/stream" && req.method === "POST") return chatStream(req, res);
+
+    // Unified multi-provider music control
+    if (url.pathname === "/api/music/providers") return json(res, await musicProviderStatuses());
+    if (url.pathname === "/api/music/play"     && req.method === "POST") return musicPlay(req, res);
+    if (url.pathname === "/api/music/search")   return musicSearch(url, res);
+    if (url.pathname === "/api/music/queue"    && req.method === "POST") return musicQueue(req, res);
+    if (url.pathname === "/api/music/transfer" && req.method === "POST") return musicTransfer(req, res);
+    if (url.pathname === "/api/music/identify") return musicIdentify(url, res);
+
+    // YouTube — primary alternative provider for in-browser playback
+    if (url.pathname === "/api/youtube/search")  return youtubeSearchEndpoint(url, res);
+    if (url.pathname === "/api/youtube/resolve") return youtubeResolveEndpoint(url, res);
+
+    // Spotify — extended endpoints (queue / devices / audio-features / transfer)
+    if (url.pathname === "/api/spotify/devices") return spotifyDevices(res);
+    if (url.pathname === "/api/spotify/queue"   && req.method === "POST") return spotifyQueueEndpoint(req, res);
+    if (url.pathname === "/api/spotify/transfer"&& req.method === "POST") return spotifyTransferEndpoint(req, res);
+    if (url.pathname === "/api/spotify/features") return spotifyFeaturesEndpoint(url, res);
+    if (url.pathname === "/api/spotify/search")  return spotifySearchEndpoint(url, res);
+
+    // Apple MusicKit developer-token endpoint (only active when MusicKit creds present)
+    if (url.pathname === "/api/apple/developer-token") return appleDeveloperTokenEndpoint(res);
+
+    // Conversation memory — read / clear short-term context
+    if (url.pathname === "/api/memory" && req.method === "GET")    return json(res, readMemory());
+    if (url.pathname === "/api/memory" && req.method === "DELETE") { writeMemory({ summary: "", recent: [] }); return json(res, { ok: true }); }
 
     return serveStatic(url.pathname, res);
   } catch (error) {
@@ -81,6 +112,7 @@ async function health() {
   const state = readState();
   const provider = process.env.BLUE_LLM_PROVIDER || "ollama";
   const ollama = provider === "ollama" ? await ollamaStatus() : { online: false, model: "" };
+  const appleReady = Boolean(process.env.APPLE_TEAM_ID && process.env.APPLE_KEY_ID && process.env.APPLE_PRIVATE_KEY);
   return {
     ok: true,
     bridge: "local",
@@ -93,6 +125,17 @@ async function health() {
     spotifyOAuth: Boolean(process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET),
     spotifyRedirectUri: spotifyRedirectUri(),
     mediaKeys: process.platform === "win32",
+    // ── New ──
+    streaming:    true,
+    youtube:      true, // always available — IFrame Player needs no key
+    youtubeKeyed: Boolean(process.env.YOUTUBE_API_KEY),
+    apple:        appleReady,
+    appleSetupRequired: !appleReady,
+    providers: {
+      spotify: Boolean(state.spotify?.access_token || process.env.SPOTIFY_ACCESS_TOKEN),
+      youtube: true,
+      apple:   appleReady,
+    },
   };
 }
 
@@ -1089,4 +1132,945 @@ function text(res, message, status = 200) {
 function html(res, message, status = 200) {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
   res.end(`<!doctype html><html><body style="font-family:sans-serif">${message}</body></html>`);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// CONVERSATION MEMORY
+// Short-term rolling memory persisted across page reloads. We keep a tight
+// "recent" window plus a compressed "summary" of older turns. The summary is
+// fed back into the system prompt so Blue can recall what was discussed
+// without paying full token cost.
+// ════════════════════════════════════════════════════════════════════════════
+const MEMORY_MAX_RECENT = 16;
+
+function readMemory() {
+  const state = readState();
+  const m = state.memory || {};
+  return {
+    summary:       String(m.summary  || ""),
+    recent:        Array.isArray(m.recent)        ? m.recent.slice(-MEMORY_MAX_RECENT) : [],
+    preferredMood: m.preferredMood   || "",
+    preferredProvider: m.preferredProvider || "",
+    activeMood:    m.activeMood      || "",
+  };
+}
+
+function writeMemory(next) {
+  const state = readState();
+  state.memory = {
+    summary:       String(next.summary || "").slice(0, 1400),
+    recent:        Array.isArray(next.recent) ? next.recent.slice(-MEMORY_MAX_RECENT) : [],
+    preferredMood: next.preferredMood || "",
+    preferredProvider: next.preferredProvider || "",
+    activeMood:    next.activeMood    || "",
+  };
+  writeState(state);
+  return state.memory;
+}
+
+function appendMemoryTurn(turn) {
+  const memory = readMemory();
+  memory.recent.push({
+    role: turn.role,
+    text: String(turn.text || "").slice(0, 600),
+    at:   Date.now(),
+  });
+  if (memory.recent.length > MEMORY_MAX_RECENT) {
+    const overflow = memory.recent.slice(0, memory.recent.length - MEMORY_MAX_RECENT);
+    memory.recent  = memory.recent.slice(-MEMORY_MAX_RECENT);
+    if (overflow.length) memory.summary = compactMemorySummary(memory.summary, overflow);
+  }
+  return writeMemory(memory);
+}
+
+function compactMemorySummary(prior, overflow) {
+  const bullets = overflow
+    .filter((t) => t && t.text)
+    .map((t) => {
+      const who  = t.role === "user" ? "User" : "Blue";
+      const text = String(t.text).replace(/\s+/g, " ").trim().slice(0, 110);
+      return `${who}: ${text}`;
+    })
+    .join(" | ");
+  const next = (prior ? `${prior} | ` : "") + bullets;
+  return next.slice(-1400);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROMPT CONSTRUCTION
+// Blue's persona prompt + tool definitions live here so they can be reused
+// across streaming and non-streaming paths.
+// ════════════════════════════════════════════════════════════════════════════
+function buildBlueSystemPrompt({ context = {}, memory = {}, allowTools = false } = {}) {
+  const lines = [
+    "You are Blue — Ayush's personal music agent and friendly conversational AI.",
+    "Voice rules:",
+    "- Sound like a thoughtful friend, not an assistant. Use contractions and vary sentence length.",
+    "- Avoid robotic phrasing ('I am here to help', 'I will assist'). Use 'I'm', 'I'll', 'let me'.",
+    "- Casual chat → casual short reply. No music push unless asked.",
+    "- Music questions → opinionated, specific, concise.",
+    "- Don't over-use Ayush's name.",
+    "- Don't echo the user's question back; respond directly.",
+    "- Topic isn't limited to music — chat about anything the user wants.",
+    "- Track conversation context. Reference earlier turns naturally when relevant.",
+    "- Default reply: one or two short sentences. Go longer only if depth is requested.",
+  ];
+  if (memory.summary) {
+    lines.push("", `Earlier conversation summary: ${memory.summary}`);
+  }
+  if (context.mood) lines.push(`Current vibe reading: ${context.mood}.`);
+  if (context.currentTrack?.title) {
+    lines.push(`Currently playing: ${context.currentTrack.title}${context.currentTrack.artist ? ` by ${context.currentTrack.artist}` : ""}.`);
+  }
+  if (allowTools) {
+    lines.push(
+      "",
+      "You have tools available. Use them to TAKE ACTIONS, not to answer questions about taste/opinion.",
+      "Call play_track when the user wants something played. Call pause/next for transport. Call set_mood when the vibe shifts.",
+      "Don't call tools for casual conversation.",
+      "After tool execution, respond conversationally about what you did.",
+    );
+  } else {
+    lines.push(
+      "",
+      "Return JSON ONLY. Schema:",
+      '{"reply":"string","mood":"Electric|Chill|Focused|Late Night|Reflective|Calm","action":"chat|recommend|play|pause|next","playQuery":"string","provider":"auto|spotify|youtube|apple","track":{"title":"string","artist":"string","genre":"string","mood":"string","query":"string"}}',
+    );
+  }
+  return lines.join("\n");
+}
+
+function buildBlueUserPrompt({ message, fallback, context }) {
+  return [
+    `Suggested fallback track: ${JSON.stringify(fallback?.track || {})}`,
+    `Listening context: ${JSON.stringify(context || {})}`,
+    `Latest message: ${message || ""}`,
+  ].join("\n");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// STREAMING CHAT (SSE)
+// Keeps full backward compat with /api/chat. Token-level streaming uses
+// Ollama's stream:true + format:json. We extract the live value of the
+// "reply" field from the partial JSON buffer and emit deltas. The frontend
+// can speak each sentence as it completes.
+// ════════════════════════════════════════════════════════════════════════════
+async function chatStream(req, res) {
+  const body = await readJson(req).catch(() => ({}));
+  const message = String(body.message || "").trim();
+  const history = Array.isArray(body.history) ? body.history.slice(-10) : [];
+  const context = body.context || {};
+
+  // SSE headers
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(": stream open\n\n");
+
+  const send = (event, data) => {
+    try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+  };
+
+  // Always record the user turn in memory up-front
+  if (message) appendMemoryTurn({ role: "user", text: message });
+
+  const fallback = localBlueReply(message, context, history);
+  const provider = (process.env.BLUE_LLM_PROVIDER || "ollama").toLowerCase();
+  // Only short-circuit to local when the message is genuinely fast-path:
+  // direct transport commands (play/pause/next) and short greetings/casuals.
+  // Anything substantive — including music recommendations or open-ended
+  // chat — should route through Ollama for richer, less-repetitive replies.
+  const transportAction = fallback.fast && ["play", "pause", "next"].includes(fallback.action);
+  const tinyGreeting    = fallback.fast && fallback.action === "chat" && message.length <= 18;
+  const useLocal = provider === "local"
+    || !shouldUseOllama(message)
+    || transportAction
+    || tinyGreeting;
+
+  if (useLocal) {
+    send("meta", { provider: "local", streaming: true });
+    await streamWordsTo(send, fallback.reply || "");
+    appendMemoryTurn({ role: "blue", text: fallback.reply || "" });
+    send("done", { ...fallback, ok: true });
+    res.end();
+    return;
+  }
+
+  let streamedReply = "";
+  let metaSent = false;
+  try {
+    const model = await resolveOllamaModel();
+    const memory = readMemory();
+    const compactContext = compactBlueContext(context);
+    const systemPrompt = buildBlueSystemPrompt({ context: compactContext, memory });
+    const userPrompt   = buildBlueUserPrompt({ message, fallback, context: compactContext });
+
+    send("meta", { provider: "ollama", model, streaming: true });
+    metaSent = true;
+
+    const messages = [{ role: "system", content: systemPrompt }];
+    for (const item of history) {
+      if (!item || !item.text) continue;
+      if (item.role === "user") messages.push({ role: "user", content: String(item.text).slice(0, 400) });
+      else if (item.role === "blue") messages.push({ role: "assistant", content: JSON.stringify({ reply: String(item.text).slice(0, 400) }) });
+    }
+    messages.push({ role: "user", content: userPrompt });
+
+    const upstream = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        format: "json",
+        keep_alive: process.env.OLLAMA_KEEP_ALIVE || "30m",
+        messages,
+        options: {
+          temperature: Number(process.env.OLLAMA_TEMPERATURE || 0.7),
+          num_ctx:     Number(process.env.OLLAMA_NUM_CTX     || 2048),
+          num_predict: Number(process.env.OLLAMA_NUM_PREDICT || 240),
+        },
+      }),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const txt = await upstream.text().catch(() => "");
+      throw new Error(`Ollama ${upstream.status}: ${txt.slice(0, 160)}`);
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let jsonContent = "";
+
+    for await (const chunk of upstream.body) {
+      const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+      buffer += text;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let evt = null;
+        try { evt = JSON.parse(trimmed); } catch { continue; }
+        if (!evt) continue;
+        const piece = evt.message?.content || evt.response || "";
+        if (piece) {
+          jsonContent += piece;
+          const replyNow = extractReplyField(jsonContent);
+          if (replyNow !== null && replyNow.length > streamedReply.length) {
+            const delta = replyNow.slice(streamedReply.length);
+            send("token", { text: delta });
+            streamedReply = replyNow;
+          }
+        }
+        if (evt.done) {
+          let parsed;
+          try { parsed = parseModelJson(jsonContent); } catch { parsed = {}; }
+          const sanitized = sanitizeBlueReply(parsed, fallback);
+          if (sanitized.reply && sanitized.reply.length > streamedReply.length) {
+            send("token", { text: sanitized.reply.slice(streamedReply.length) });
+            streamedReply = sanitized.reply;
+          }
+          appendMemoryTurn({ role: "blue", text: sanitized.reply || "" });
+          send("done", { ...fallback, ...sanitized, ok: true, provider: "ollama" });
+          res.end();
+          return;
+        }
+      }
+    }
+
+    // Stream ended without explicit done — flush whatever we have
+    let parsed;
+    try { parsed = parseModelJson(jsonContent); } catch { parsed = {}; }
+    const sanitized = sanitizeBlueReply(parsed, fallback);
+    if (sanitized.reply && sanitized.reply.length > streamedReply.length) {
+      send("token", { text: sanitized.reply.slice(streamedReply.length) });
+    }
+    appendMemoryTurn({ role: "blue", text: sanitized.reply || "" });
+    send("done", { ...fallback, ...sanitized, ok: true, provider: "ollama" });
+    res.end();
+  } catch (error) {
+    const note = `Ollama unavailable: ${error.message}`;
+    // If we got nothing usable from Ollama, stream the local fallback instead.
+    if (!streamedReply) {
+      if (!metaSent) send("meta", { provider: "local", streaming: true });
+      await streamWordsTo(send, fallback.reply || "");
+      appendMemoryTurn({ role: "blue", text: fallback.reply || "" });
+    }
+    send("done", { ...fallback, ok: true, provider: "local", warning: note });
+    try { res.end(); } catch {}
+  }
+}
+
+async function streamWordsTo(send, text) {
+  const parts = String(text).split(/(\s+)/);
+  for (const part of parts) {
+    send("token", { text: part });
+    // small yield so the client gets distinct events
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
+// Walk a partial JSON buffer to pull out the (possibly incomplete) value of
+// the "reply" field. Returns the unescaped string, or null if the field
+// hasn't appeared yet. We do this manually because partial JSON is, of
+// course, not parseable by JSON.parse mid-stream.
+function extractReplyField(json) {
+  const i = json.indexOf('"reply"');
+  if (i < 0) return null;
+  let p = json.indexOf(":", i);
+  if (p < 0) return null;
+  p++;
+  // Skip whitespace
+  while (p < json.length && /\s/.test(json[p])) p++;
+  if (json[p] !== '"') return null;
+  p++;
+  let out = "";
+  while (p < json.length) {
+    const c = json[p];
+    if (c === "\\") {
+      const nxt = json[p + 1];
+      if (!nxt) break;
+      if      (nxt === "n")  out += "\n";
+      else if (nxt === "t")  out += "\t";
+      else if (nxt === "r")  out += "\r";
+      else if (nxt === '"')  out += '"';
+      else if (nxt === "\\") out += "\\";
+      else if (nxt === "/")  out += "/";
+      else if (nxt === "u") {
+        const hex = json.slice(p + 2, p + 6);
+        if (hex.length < 4) break;
+        out += String.fromCharCode(parseInt(hex, 16));
+        p += 6;
+        continue;
+      } else out += nxt;
+      p += 2;
+    } else if (c === '"') {
+      return out;
+    } else {
+      out += c;
+      p++;
+    }
+  }
+  return out;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MULTI-PROVIDER MUSIC ABSTRACTION
+// Unified API that lets the frontend say "play this" without caring whether
+// it ends up on Spotify, YouTube, or Apple Music. Provider selection follows:
+//   1. Explicit provider in request
+//   2. User preference (memory.preferredProvider)
+//   3. Capability order: spotify → youtube → spotify-preview
+// Each provider implements: play, search, queue (where supported).
+// ════════════════════════════════════════════════════════════════════════════
+async function musicProviderStatuses() {
+  const state = readState();
+  return {
+    ok: true,
+    providers: {
+      spotify: {
+        connected:     Boolean(state.spotify?.access_token || process.env.SPOTIFY_ACCESS_TOKEN),
+        oauth:         Boolean(process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET),
+        capabilities:  ["play", "search", "queue", "transfer", "audio-features"],
+        loginUrl:      "/api/spotify/login",
+      },
+      youtube: {
+        connected:     true, // always available — IFrame Player is public
+        hasApiKey:     Boolean(process.env.YOUTUBE_API_KEY),
+        capabilities:  ["play", "search"],
+      },
+      apple: {
+        connected:     Boolean(process.env.APPLE_TEAM_ID && process.env.APPLE_KEY_ID && process.env.APPLE_PRIVATE_KEY),
+        capabilities:  ["play", "search"],
+        setupRequired: !(process.env.APPLE_TEAM_ID && process.env.APPLE_KEY_ID && process.env.APPLE_PRIVATE_KEY),
+      },
+    },
+  };
+}
+
+function chooseProvider(requested, statuses) {
+  const order = [requested, "spotify", "youtube", "apple"].filter(Boolean);
+  for (const name of order) {
+    const p = statuses.providers[name];
+    if (p?.connected) return name;
+  }
+  return "youtube"; // YouTube is always reachable as a search-driven fallback
+}
+
+async function musicPlay(req, res) {
+  try {
+    const body = await readJson(req);
+    const requested = (body.provider || "auto").toLowerCase();
+    const query  = String(body.query  || "").trim();
+    const uri    = String(body.uri    || "").trim();
+    const title  = String(body.title  || "").trim();
+    const artist = String(body.artist || "").trim();
+    const composedQuery = query || [title, artist].filter(Boolean).join(" ");
+
+    if (!composedQuery && !uri) {
+      return json(res, { ok: false, error: "Provide a query, title, or uri." }, 400);
+    }
+
+    const statuses = await musicProviderStatuses();
+    const order = requested === "auto"
+      ? ["spotify", "youtube", "apple"]
+      : [requested, "spotify", "youtube", "apple"];
+
+    const seen = new Set();
+    const attempts = [];
+    for (const name of order) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const p = statuses.providers[name];
+      if (!p?.connected) {
+        attempts.push({ provider: name, ok: false, reason: "not connected" });
+        continue;
+      }
+      const result = await runProviderPlay(name, { query: composedQuery, uri, title, artist }).catch((e) => ({ ok: false, error: e.message }));
+      attempts.push({ provider: name, ...result });
+      if (result.ok) {
+        return json(res, { ok: true, provider: name, attempts, ...result });
+      }
+      // For preview-only outcomes, count as success
+      if (result.previewUrl) {
+        return json(res, { ok: true, provider: `${name}-preview`, attempts, ...result });
+      }
+    }
+    return json(res, { ok: false, attempts, error: "No provider could play that track." });
+  } catch (error) {
+    json(res, { ok: false, error: error.message }, 500);
+  }
+}
+
+async function runProviderPlay(name, args) {
+  if (name === "spotify") return spotifyProviderPlay(args);
+  if (name === "youtube") return youtubeProviderPlay(args);
+  if (name === "apple")   return appleProviderPlay(args);
+  return { ok: false, error: `Unknown provider ${name}` };
+}
+
+// Spotify play, factored from spotifyPlay() so the multi-provider path can
+// reuse it without going through HTTP. Returns the same shape musicPlay expects.
+async function spotifyProviderPlay({ query, uri, title, artist }) {
+  let trackUri = uri;
+  let track = null;
+  let item = null;
+  if (!trackUri) {
+    try {
+      const search = await spotifyFetch(`/search?type=track&limit=1&q=${encodeURIComponent(query)}`);
+      item = search.tracks?.items?.[0];
+      if (item) {
+        trackUri = item.uri;
+        const genres = await spotifyGenres([item]).catch(() => ({}));
+        track = normalizeSpotifyTrack(item, genres);
+        track.previewUrl = item.preview_url || null;
+        track.albumArt   = item.album?.images?.[0]?.url || "";
+      }
+    } catch (e) {
+      return { ok: false, error: friendlySpotifyError(e.message) };
+    }
+  }
+  if (!trackUri) return { ok: false, error: friendlySpotifyError("No Spotify track found.") };
+
+  // Pick a device
+  let deviceId = "", deviceName = "";
+  try {
+    const list = await spotifyFetch("/me/player/devices");
+    const devices = list?.devices || [];
+    const active = devices.find((d) => d.is_active);
+    const target = active || devices[0];
+    if (target) {
+      deviceId = target.id;
+      deviceName = target.name;
+      if (!active) {
+        await spotifyFetch("/me/player", {
+          method: "PUT",
+          body: JSON.stringify({ device_ids: [deviceId], play: false }),
+        });
+      }
+    }
+  } catch {}
+
+  try {
+    const path = deviceId ? `/me/player/play?device_id=${deviceId}` : "/me/player/play";
+    await spotifyFetch(path, { method: "PUT", body: JSON.stringify({ uris: [trackUri] }) });
+    return {
+      ok: true,
+      track,
+      device: deviceName,
+      previewUrl: track?.previewUrl || item?.preview_url || null,
+      uri: trackUri,
+    };
+  } catch (e) {
+    // No active device or no premium — surface the preview if we have one
+    return {
+      ok: false,
+      track,
+      previewUrl: track?.previewUrl || item?.preview_url || null,
+      uri: trackUri,
+      error: friendlySpotifyError(e.message),
+    };
+  }
+}
+
+// YouTube provider. We never start playback server-side — instead we resolve
+// a videoId for the query and return it. The frontend's IFrame Player loads
+// that videoId. This is fully legal and works without an API key.
+async function youtubeProviderPlay({ query, title, artist }) {
+  const q = query || [title, artist].filter(Boolean).join(" ");
+  if (!q) return { ok: false, error: "No query." };
+  const result = await resolveYouTubeVideo(q).catch((e) => ({ error: e.message }));
+  if (!result || !result.videoId) {
+    return { ok: false, error: result?.error || "No YouTube video found." };
+  }
+  return {
+    ok: true,
+    youtube: {
+      videoId:    result.videoId,
+      title:      result.title || title,
+      channel:    result.channel || artist,
+      thumbnail:  result.thumbnail || "",
+      embedUrl:   `https://www.youtube.com/embed/${result.videoId}?autoplay=1&playsinline=1&modestbranding=1&enablejsapi=1`,
+      watchUrl:   `https://www.youtube.com/watch?v=${result.videoId}`,
+    },
+    track: {
+      title:  result.title  || title  || q,
+      artist: result.channel || artist || "",
+      genre:  "Unknown",
+      mood:   inferMood(`${result.title || ""} ${result.channel || ""}`) || "Chill",
+      query:  q,
+      albumArt: result.thumbnail || "",
+      provider: "youtube",
+    },
+  };
+}
+
+// Apple Music — without the user's developer credentials we can't sign a
+// developer JWT, and without a subscriber-side login we can't trigger
+// playback. We return setup guidance instead of failing silently.
+async function appleProviderPlay() {
+  if (!process.env.APPLE_TEAM_ID || !process.env.APPLE_KEY_ID || !process.env.APPLE_PRIVATE_KEY) {
+    return {
+      ok: false,
+      error: "Apple Music needs APPLE_TEAM_ID, APPLE_KEY_ID, and APPLE_PRIVATE_KEY in .env. See README.",
+      setupRequired: true,
+    };
+  }
+  // The frontend handles MusicKit play directly once it has the developer
+  // token — server-side we just confirm credentials are wired. The frontend
+  // will call /api/apple/developer-token then MusicKit.authorize().
+  return {
+    ok: false,
+    apple: { ready: true, needsClientAuth: true },
+    error: "Apple Music ready — sign in via the player to start playback.",
+  };
+}
+
+async function musicSearch(url, res) {
+  const provider = (url.searchParams.get("provider") || "auto").toLowerCase();
+  const q        = url.searchParams.get("q") || "";
+  if (!q.trim()) return json(res, { ok: false, error: "q is required." }, 400);
+
+  const out = { ok: true, provider, results: [] };
+  try {
+    if (provider === "spotify" || provider === "auto") {
+      const r = await spotifyFetch(`/search?type=track&limit=8&q=${encodeURIComponent(q)}`).catch(() => null);
+      const items = r?.tracks?.items || [];
+      const genres = items.length ? await spotifyGenres(items).catch(() => ({})) : {};
+      out.results.push(...items.map((t) => ({
+        provider: "spotify",
+        ...normalizeSpotifyTrack(t, genres),
+        albumArt:   t.album?.images?.[0]?.url || "",
+        previewUrl: t.preview_url || null,
+        uri:        t.uri,
+      })));
+    }
+    if (provider === "youtube" || (provider === "auto" && out.results.length < 3)) {
+      const yt = await youtubeSearch(q).catch(() => []);
+      out.results.push(...yt.slice(0, 5).map((v) => ({
+        provider: "youtube",
+        title:    v.title,
+        artist:   v.channel,
+        videoId:  v.videoId,
+        albumArt: v.thumbnail,
+        embedUrl: `https://www.youtube.com/embed/${v.videoId}?autoplay=1&playsinline=1&modestbranding=1&enablejsapi=1`,
+        query:    q,
+      })));
+    }
+    json(res, out);
+  } catch (error) {
+    json(res, { ok: false, error: error.message }, 500);
+  }
+}
+
+async function musicQueue(req, res) {
+  try {
+    const body = await readJson(req);
+    const provider = (body.provider || "spotify").toLowerCase();
+    if (provider === "spotify") {
+      let uri = body.uri || "";
+      if (!uri && body.query) {
+        const search = await spotifyFetch(`/search?type=track&limit=1&q=${encodeURIComponent(body.query)}`);
+        uri = search.tracks?.items?.[0]?.uri || "";
+      }
+      if (!uri) return json(res, { ok: false, error: "Need a Spotify uri or query." }, 400);
+      await spotifyFetch(`/me/player/queue?uri=${encodeURIComponent(uri)}`, { method: "POST" });
+      return json(res, { ok: true, provider: "spotify", uri });
+    }
+    return json(res, { ok: false, error: `Queueing not supported for ${provider} yet.` }, 501);
+  } catch (error) {
+    json(res, { ok: false, error: friendlySpotifyError(error.message) }, 500);
+  }
+}
+
+async function musicTransfer(req, res) {
+  try {
+    const body = await readJson(req);
+    const deviceId = body.deviceId;
+    if (!deviceId) return json(res, { ok: false, error: "deviceId required." }, 400);
+    await spotifyFetch("/me/player", { method: "PUT", body: JSON.stringify({ device_ids: [deviceId], play: !!body.play }) });
+    json(res, { ok: true, deviceId });
+  } catch (error) {
+    json(res, { ok: false, error: friendlySpotifyError(error.message) }, 500);
+  }
+}
+
+async function musicIdentify(url, res) {
+  const title  = url.searchParams.get("title")  || "";
+  const artist = url.searchParams.get("artist") || "";
+  if (!title) return json(res, { ok: false, error: "title required." }, 400);
+  try {
+    const result = await classifyTrackGenre({ title, artist });
+    json(res, { ok: true, ...result });
+  } catch (error) {
+    json(res, { ok: false, error: error.message });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// YOUTUBE PROVIDER
+// Two paths — Data API v3 when YOUTUBE_API_KEY is set (clean, rate-limited),
+// or HTML scraping of youtube.com/results when no key is available. The
+// scraper extracts video IDs from the ytInitialData JSON blob the page ships.
+// ════════════════════════════════════════════════════════════════════════════
+async function youtubeSearchEndpoint(url, res) {
+  const q = url.searchParams.get("q") || "";
+  if (!q.trim()) return json(res, { ok: false, error: "q is required." }, 400);
+  try {
+    const results = await youtubeSearch(q);
+    json(res, { ok: true, results });
+  } catch (error) {
+    json(res, { ok: false, error: error.message });
+  }
+}
+
+async function youtubeResolveEndpoint(url, res) {
+  const q = url.searchParams.get("q") || "";
+  if (!q.trim()) return json(res, { ok: false, error: "q is required." }, 400);
+  try {
+    const r = await resolveYouTubeVideo(q);
+    json(res, { ok: true, ...r });
+  } catch (error) {
+    json(res, { ok: false, error: error.message });
+  }
+}
+
+async function resolveYouTubeVideo(query) {
+  const results = await youtubeSearch(query);
+  const first = results[0];
+  if (!first) return { videoId: "", title: "", channel: "", thumbnail: "" };
+  return first;
+}
+
+async function youtubeSearch(query) {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (key) {
+    try {
+      const params = new URLSearchParams({
+        part: "snippet",
+        type: "video",
+        videoCategoryId: "10", // Music
+        maxResults: "8",
+        q: query,
+        key,
+      });
+      const r = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
+      const data = await r.json();
+      if (!r.ok) throw new Error(data?.error?.message || `YouTube API ${r.status}`);
+      return (data.items || []).map((item) => ({
+        videoId:   item.id?.videoId,
+        title:     item.snippet?.title,
+        channel:   item.snippet?.channelTitle,
+        thumbnail: item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.medium?.url || "",
+      })).filter((v) => v.videoId);
+    } catch (error) {
+      // Fall through to scraper on API error
+      console.warn("YouTube Data API failed, falling back to scrape:", error.message);
+    }
+  }
+  return scrapeYouTubeSearch(query);
+}
+
+// Pull videoIds out of youtube.com/results without an API key. This is the
+// same technique used by libraries like `youtube-search-without-api-key`
+// — we fetch the HTML, find ytInitialData, and walk the result list.
+async function scrapeYouTubeSearch(query) {
+  const params = new URLSearchParams({ search_query: query, sp: "EgIQAQ%3D%3D" /* video filter */ });
+  const r = await fetch(`https://www.youtube.com/results?${params}`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Blue/1.0",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+  if (!r.ok) throw new Error(`YouTube HTML ${r.status}`);
+  const html = await r.text();
+  const m = html.match(/var ytInitialData\s*=\s*(\{.+?\});<\/script>/s);
+  if (!m) return [];
+  let data;
+  try { data = JSON.parse(m[1]); } catch { return []; }
+  const out = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (node.videoRenderer && node.videoRenderer.videoId) {
+      const v = node.videoRenderer;
+      out.push({
+        videoId:   v.videoId,
+        title:     v.title?.runs?.[0]?.text || v.title?.simpleText || "",
+        channel:   v.ownerText?.runs?.[0]?.text || v.longBylineText?.runs?.[0]?.text || "",
+        thumbnail: (v.thumbnail?.thumbnails || []).slice(-1)[0]?.url || "",
+        duration:  v.lengthText?.simpleText || "",
+      });
+      return;
+    }
+    if (Array.isArray(node)) { for (const child of node) walk(child); return; }
+    for (const key of Object.keys(node)) walk(node[key]);
+  };
+  walk(data);
+  return out.slice(0, 12);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SPOTIFY EXTENDED
+// Adds queue, devices, transfer, audio-features (for mood inference), search.
+// ════════════════════════════════════════════════════════════════════════════
+async function spotifyDevices(res) {
+  try {
+    const data = await spotifyFetch("/me/player/devices");
+    json(res, { ok: true, devices: data?.devices || [] });
+  } catch (error) {
+    json(res, { ok: false, devices: [], error: friendlySpotifyError(error.message) }, 501);
+  }
+}
+
+async function spotifyQueueEndpoint(req, res) {
+  try {
+    const body = await readJson(req);
+    let uri = body.uri || "";
+    if (!uri && body.query) {
+      const search = await spotifyFetch(`/search?type=track&limit=1&q=${encodeURIComponent(body.query)}`);
+      uri = search.tracks?.items?.[0]?.uri || "";
+    }
+    if (!uri) return json(res, { ok: false, error: "Need a uri or query." }, 400);
+    await spotifyFetch(`/me/player/queue?uri=${encodeURIComponent(uri)}`, { method: "POST" });
+    json(res, { ok: true, uri });
+  } catch (error) {
+    json(res, { ok: false, error: friendlySpotifyError(error.message) }, 500);
+  }
+}
+
+async function spotifyTransferEndpoint(req, res) {
+  try {
+    const body = await readJson(req);
+    if (!body.deviceId) return json(res, { ok: false, error: "deviceId required." }, 400);
+    await spotifyFetch("/me/player", {
+      method: "PUT",
+      body: JSON.stringify({ device_ids: [body.deviceId], play: !!body.play }),
+    });
+    json(res, { ok: true });
+  } catch (error) {
+    json(res, { ok: false, error: friendlySpotifyError(error.message) }, 500);
+  }
+}
+
+async function spotifyFeaturesEndpoint(url, res) {
+  const id = url.searchParams.get("id") || "";
+  if (!id) return json(res, { ok: false, error: "id required." }, 400);
+  try {
+    const features = await spotifyFetch(`/audio-features/${id}`);
+    json(res, { ok: true, features, mood: spotifyMoodFromFeatures(features) });
+  } catch (error) {
+    json(res, { ok: false, error: friendlySpotifyError(error.message) }, 500);
+  }
+}
+
+async function spotifySearchEndpoint(url, res) {
+  const q = url.searchParams.get("q") || "";
+  const type = url.searchParams.get("type") || "track";
+  const limit = url.searchParams.get("limit") || "8";
+  if (!q.trim()) return json(res, { ok: false, error: "q required." }, 400);
+  try {
+    const r = await spotifyFetch(`/search?type=${encodeURIComponent(type)}&limit=${encodeURIComponent(limit)}&q=${encodeURIComponent(q)}`);
+    const items = r?.tracks?.items || [];
+    const genres = await spotifyGenres(items).catch(() => ({}));
+    json(res, {
+      ok: true,
+      results: items.map((t) => ({
+        ...normalizeSpotifyTrack(t, genres),
+        albumArt:   t.album?.images?.[0]?.url || "",
+        previewUrl: t.preview_url || null,
+        uri:        t.uri,
+      })),
+    });
+  } catch (error) {
+    json(res, { ok: false, error: friendlySpotifyError(error.message) }, 500);
+  }
+}
+
+function spotifyMoodFromFeatures(f = {}) {
+  // Map the 5 most useful features (energy, valence, danceability, tempo,
+  // acousticness) onto Blue's mood vocabulary.
+  if (!f || typeof f.energy !== "number") return "";
+  const { energy = 0.5, valence = 0.5, danceability = 0.5, tempo = 110, acousticness = 0.4 } = f;
+  if (energy > 0.78 && tempo > 120 && danceability > 0.55) return "Electric";
+  if (energy < 0.35 && acousticness > 0.55) return valence > 0.45 ? "Calm" : "Reflective";
+  if (energy < 0.55 && valence < 0.4)  return "Late Night";
+  if (energy > 0.55 && energy < 0.78 && valence > 0.55) return "Chill";
+  if (energy >= 0.6 && valence < 0.5)  return "Focused";
+  return "Chill";
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// APPLE MUSIC DEVELOPER TOKEN
+// MusicKit JS needs a developer token (signed JWT) before it can authorize a
+// user. We mint that JWT here using ES256 (Apple's required algorithm). Real
+// playback still requires a subscriber JWT, which MusicKit obtains client-side
+// after the user signs in with their Apple ID.
+// ════════════════════════════════════════════════════════════════════════════
+async function appleDeveloperTokenEndpoint(res) {
+  const teamId  = process.env.APPLE_TEAM_ID;
+  const keyId   = process.env.APPLE_KEY_ID;
+  const privKey = (process.env.APPLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+  if (!teamId || !keyId || !privKey) {
+    return json(res, {
+      ok: false,
+      error: "Apple Music creds missing. Set APPLE_TEAM_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY in .env.",
+      setupRequired: true,
+    }, 501);
+  }
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 60 * 60 * 12; // 12h
+    const header  = { alg: "ES256", kid: keyId, typ: "JWT" };
+    const payload = { iss: teamId, iat: now, exp };
+    const token = signES256JWT(header, payload, privKey);
+    json(res, { ok: true, token, expiresAt: exp });
+  } catch (error) {
+    json(res, { ok: false, error: error.message }, 500);
+  }
+}
+
+function signES256JWT(header, payload, privateKeyPem) {
+  const b64url = (buf) => Buffer.from(buf)
+    .toString("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const headerB64  = b64url(JSON.stringify(header));
+  const payloadB64 = b64url(JSON.stringify(payload));
+  const data = `${headerB64}.${payloadB64}`;
+  const signer = crypto.createSign("SHA256");
+  signer.update(data);
+  signer.end();
+  // Apple expects a JOSE-format ES256 signature (r||s, 64 bytes), but
+  // crypto.createSign returns DER. Use dsaEncoding:"ieee-p1363" to get JOSE.
+  const sig = signer.sign({ key: privateKeyPem, dsaEncoding: "ieee-p1363" });
+  return `${data}.${b64url(sig)}`;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// GENRE / MOOD INTELLIGENCE
+// Replaces the single-bucket classifier with a multi-tag classifier that
+// returns confidence scores. Falls back to MusicBrainz / iTunes Search for
+// "Unknown" tracks. Multi-genre output drives the dashboard's secondary tags.
+// ════════════════════════════════════════════════════════════════════════════
+const GENRE_CACHE = new Map();
+const GENRE_CACHE_MAX = 500;
+
+async function classifyTrackGenre({ title, artist }) {
+  const key = `${title}|${artist}`.toLowerCase();
+  if (GENRE_CACHE.has(key)) return GENRE_CACHE.get(key);
+
+  const tags = new Map(); // bucket → score
+
+  const addTag = (bucket, score) => {
+    if (!bucket || bucket === "Unknown") return;
+    tags.set(bucket, (tags.get(bucket) || 0) + score);
+  };
+
+  // 1. Text-based heuristics (artist names, track titles)
+  const textGuess = inferGenreFromText(`${title} ${artist}`);
+  if (textGuess && textGuess !== "Unknown") addTag(textGuess, 0.6);
+
+  // 2. Bucketize anything the artist string hints at
+  const bucket = normalizeGenre(`${title} ${artist}`);
+  if (bucket && bucket !== "Other" && bucket !== "Unknown") addTag(bucket, 0.4);
+
+  // 3. iTunes Search API — free, no auth, decent genre tags
+  try {
+    const params = new URLSearchParams({
+      term: `${title} ${artist}`.trim(),
+      entity: "song",
+      limit: "5",
+    });
+    const r = await fetch(`https://itunes.apple.com/search?${params}`, { headers: { "User-Agent": "Blue Music Agent" } });
+    if (r.ok) {
+      const data = await r.json();
+      for (const item of (data.results || []).slice(0, 5)) {
+        const g = item.primaryGenreName;
+        if (g) addTag(normalizeGenre(g), 0.5);
+      }
+    }
+  } catch {}
+
+  // 4. MusicBrainz — slower but more accurate for non-English / rare tracks.
+  // Skip if iTunes already gave us strong signal.
+  if (tags.size < 2) {
+    try {
+      const params = new URLSearchParams({
+        query: `recording:"${title}" AND artist:"${artist}"`,
+        fmt: "json",
+        limit: "3",
+      });
+      const r = await fetch(`https://musicbrainz.org/ws/2/recording?${params}`, {
+        headers: { "User-Agent": "Blue Music Agent (avk0603@gmail.com)" },
+      });
+      if (r.ok) {
+        const data = await r.json();
+        for (const rec of (data.recordings || []).slice(0, 3)) {
+          for (const tag of (rec.tags || []).slice(0, 5)) {
+            const g = normalizeGenre(tag.name);
+            if (g && g !== "Other") addTag(g, 0.3 * Math.min(1, (tag.count || 1) / 5));
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const sorted = [...tags.entries()].sort((a, b) => b[1] - a[1]);
+  const total = sorted.reduce((s, [, v]) => s + v, 0) || 1;
+  const result = {
+    primary:    sorted[0]?.[0] || "Unknown",
+    secondary:  sorted.slice(1, 4).map(([name, score]) => ({ name, confidence: +(score / total).toFixed(2) })),
+    confidence: sorted[0] ? +(sorted[0][1] / total).toFixed(2) : 0,
+    all:        sorted.map(([name, score]) => ({ name, confidence: +(score / total).toFixed(2) })),
+  };
+
+  if (GENRE_CACHE.size >= GENRE_CACHE_MAX) {
+    GENRE_CACHE.delete(GENRE_CACHE.keys().next().value);
+  }
+  GENRE_CACHE.set(key, result);
+  return result;
 }

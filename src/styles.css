@@ -237,21 +237,17 @@ a {
     inset 0 -8px 18px rgba(0, 0, 0, 0.1);
 }
 
+/* The previous build animated `translate` on these cards (cardDrift) AT THE
+   SAME TIME the tilt system was animating `transform`. Two transform sources
+   on the same element → frame-budget hot-spot AND visible jitter when hover
+   tilts collide with the drift cycle. We kill the drift entirely; the tilt
+   on hover, the GSAP reveal, and the live backdrop keep the panels alive
+   without competing for the transform property. */
 .stat-card,
 .capability-card,
 .dashboard-card,
 .agent-shell {
-  animation: cardDrift 8s ease-in-out infinite;
-}
-
-.capability-card:nth-child(2),
-.dashboard-card:nth-child(2) {
-  animation-delay: -2s;
-}
-
-.capability-card:nth-child(3),
-.dashboard-card:nth-child(3) {
-  animation-delay: -4s;
+  /* drift removed — see comment above */
 }
 
 .dashboard-stage {
@@ -1320,4 +1316,307 @@ a {
   .album-cover-wrap { max-width: 220px; }
   .lyrics-viewport, .lyrics-empty, .lyrics-static { height: 180px; }
   .lyrics-track { transform: translate3d(0, calc(71px - var(--active-index, 0) * var(--line-h)), 0); }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PROVIDER SWITCHER CHIPS
+   Compact pills that show which music engine Blue routes to. Active chip
+   is filled, idle chips are outlined, unavailable chips are dimmed and
+   non-interactive but stay visible so you know what's possible.
+   ═══════════════════════════════════════════════════════════════════════ */
+.provider-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.72);
+  transition: background 200ms ease, color 200ms ease, border-color 200ms ease, transform 200ms ease;
+}
+.provider-chip__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.32);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.0);
+  transition: background 200ms ease, box-shadow 200ms ease;
+}
+.provider-chip--idle:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.20);
+}
+.provider-chip--active {
+  background: rgba(255, 228, 77, 0.95);
+  color: #050505;
+  border-color: rgba(255, 228, 77, 0.6);
+  box-shadow: 0 0 22px rgba(255, 228, 77, 0.35);
+}
+.provider-chip--active .provider-chip__dot {
+  background: #050505;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
+}
+.provider-chip--off {
+  opacity: 0.42;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+.provider-chip--off:hover { transform: none; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   LIVE CAPTION (interim transcript while voice is hot)
+   ═══════════════════════════════════════════════════════════════════════ */
+.live-caption {
+  background: linear-gradient(90deg, rgba(255, 228, 77, 0.06), rgba(255, 228, 77, 0.02));
+  border: 1px solid rgba(255, 228, 77, 0.18);
+  color: rgba(255, 255, 255, 0.86);
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 12.5px;
+  letter-spacing: 0.005em;
+  animation: liveCaptionIn 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.live-caption__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.live-caption__dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #FFE44D;
+  box-shadow: 0 0 8px rgba(255, 228, 77, 0.6);
+  animation: typingBounce 1.2s ease-in-out infinite;
+}
+.live-caption__dots span:nth-child(2) { animation-delay: 0.16s; }
+.live-caption__dots span:nth-child(3) { animation-delay: 0.32s; }
+.live-caption__label {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: rgba(255, 228, 77, 0.85);
+  margin-right: 4px;
+}
+.live-caption__text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgba(255, 255, 255, 0.78);
+  font-style: italic;
+}
+
+@keyframes liveCaptionIn {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+  to   { opacity: 1; transform: translateY(0);   filter: blur(0);   }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   STREAMING REPLY INDICATORS (cursor + initial dot loader)
+   ═══════════════════════════════════════════════════════════════════════ */
+.streaming-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: #FFE44D;
+  border-radius: 1.5px;
+  box-shadow: 0 0 10px rgba(255, 228, 77, 0.55);
+  animation: streamingCaret 0.85s steps(2, end) infinite;
+}
+@keyframes streamingCaret {
+  0%, 100% { opacity: 0; }
+  50%       { opacity: 1; }
+}
+.streaming-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.streaming-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  animation: typingBounce 1.4s ease-in-out infinite;
+}
+.streaming-dots span:nth-child(2) { animation-delay: 0.18s; }
+.streaming-dots span:nth-child(3) { animation-delay: 0.36s; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   YOUTUBE IFRAME PLAYER
+   Replaces the album-cover tile when a YT track is active. Maintains the
+   same border-radius / shadow language as the album cover so the swap
+   feels native, not bolted on.
+   ═══════════════════════════════════════════════════════════════════════ */
+.yt-player-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 280px;
+  aspect-ratio: 1 / 1;
+  margin-inline: auto;
+  border-radius: 1.25rem;
+  overflow: hidden;
+  background: #0a0617;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 30px 60px rgba(0, 0, 0, 0.55),
+    0 0 60px rgba(236, 72, 153, 0.22),
+    0 0 120px rgba(255, 0, 80, 0.18);
+}
+.yt-player {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+}
+.yt-player__iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.yt-player__iframe iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.yt-player__loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: radial-gradient(circle at 35% 35%, #2a1d4f, #0a0617 70%);
+  color: rgba(255, 255, 255, 0.7);
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+.yt-player__spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: #FFE44D;
+  animation: spin 0.85s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.yt-player__meta {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 12px 14px 14px;
+  background: linear-gradient(0deg, rgba(0,0,0,0.78), rgba(0,0,0,0));
+  pointer-events: none;
+  color: #fff;
+}
+.yt-player__hint {
+  margin: 0;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(236, 72, 153, 0.85);
+}
+.yt-player__title {
+  margin: 4px 0 0;
+  font-family: "Syne", system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.yt-player__channel {
+  margin: 2px 0 0;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.yt-player__close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 600;
+  z-index: 5;
+}
+.yt-player__close:hover {
+  background: rgba(0, 0, 0, 0.85);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PLAYER SOURCE BADGE (Spotify | YouTube | Apple)
+   ═══════════════════════════════════════════════════════════════════════ */
+.live-player__source {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.78);
+}
+.live-player.is-youtube .live-player__source {
+  background: rgba(236, 72, 153, 0.16);
+  border-color: rgba(236, 72, 153, 0.35);
+  color: rgba(255, 200, 230, 0.95);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   SCROLL POLISH
+   The previous build left scroll-behavior: smooth on <html>, which fights
+   anchor jumps on initial load and mobile toolbars. We use it conditionally
+   via a class so the JS-driven page-load reset can disable it briefly.
+   ═══════════════════════════════════════════════════════════════════════ */
+html { scroll-behavior: auto; }
+html.smooth-scroll { scroll-behavior: smooth; }
+
+/* Better scroll snapping for sections */
+#hero, #blue-agent, #automation, #dashboard, #capabilities, #dashboard {
+  contain: paint;
+}
+
+/* Use CSS containment on heavy panels so paint is bounded to the panel
+   when their content (lyrics, charts, particles) updates. */
+.live-player, .agent-shell, .capability-card, .dashboard-card {
+  contain: layout paint;
+}
+
+/* Smoother typography rendering on macOS / Windows ClearType displays */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }

@@ -1204,48 +1204,155 @@ function formatTime(ms) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function LiveMusicPlayer({ track, lyrics, playback, isPlaying, onPlay, onPause, onNext, bridge }) {
+/* ── YouTube IFrame Player ───────────────────────────────────────────────
+   Loads the YouTube IFrame Player API on demand and mounts a player that
+   replaces the album-art tile while a YT track is active. We keep a single
+   player instance and cue new videos into it rather than tearing it down,
+   which avoids the heavy re-init cost between tracks.
+   ─────────────────────────────────────────────────────────────────────── */
+function YouTubeIFramePlayer({ video, onClose }) {
+  const containerRef = useRef(null);
+  const playerRef    = useRef(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ensureApi = () => new Promise((resolve) => {
+      if (window.YT && window.YT.Player) return resolve();
+      const prior = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => { prior?.(); resolve(); };
+      if (!document.querySelector("script[data-yt-iframe]")) {
+        const s = document.createElement("script");
+        s.src = "https://www.youtube.com/iframe_api";
+        s.async = true;
+        s.dataset.ytIframe = "1";
+        document.head.appendChild(s);
+      }
+    });
+
+    ensureApi().then(() => {
+      if (cancelled || !containerRef.current) return;
+      if (playerRef.current) {
+        // Cue the new video — much faster than recreating the player.
+        try { playerRef.current.loadVideoById(video.videoId); } catch {}
+        return;
+      }
+      playerRef.current = new window.YT.Player(containerRef.current, {
+        height: "100%",
+        width:  "100%",
+        videoId: video.videoId,
+        playerVars: {
+          autoplay:       1,
+          modestbranding: 1,
+          playsinline:    1,
+          rel:            0,
+          enablejsapi:    1,
+          controls:       1,
+          origin:         window.location.origin,
+        },
+        events: {
+          onReady: () => setReady(true),
+        },
+      });
+    });
+
+    return () => { cancelled = true; };
+  }, [video?.videoId]);
+
+  // Tear down on unmount
+  useEffect(() => () => {
+    try { playerRef.current?.destroy?.(); } catch {}
+    playerRef.current = null;
+  }, []);
+
+  if (!video?.videoId) return null;
+
+  return (
+    <div className="yt-player-wrap">
+      <div className="yt-player">
+        <div ref={containerRef} className="yt-player__iframe" />
+        {!ready && (
+          <div className="yt-player__loading">
+            <span className="yt-player__spinner" />
+            <span>Loading YouTube…</span>
+          </div>
+        )}
+      </div>
+      <div className="yt-player__meta">
+        <p className="yt-player__hint">YouTube source</p>
+        <p className="yt-player__title" title={video.title}>{video.title || "Untitled"}</p>
+        {video.channel && <p className="yt-player__channel" title={video.channel}>{video.channel}</p>}
+      </div>
+      <button type="button" className="yt-player__close alive-button" onClick={onClose} title="Switch back to the album view">
+        ×
+      </button>
+    </div>
+  );
+}
+
+function LiveMusicPlayer({ track, lyrics, playback, isPlaying, onPlay, onPause, onNext, bridge, activeProvider, setActiveProvider, youtubeVideo, setYoutubeVideo }) {
   const t = track || {};
   const hasTrack = !!t.title;
+  const isYouTube = !!youtubeVideo?.videoId;
+  const sourceLabel = isYouTube
+    ? "YouTube"
+    : (t.source || (hasTrack && bridge?.spotify ? "Spotify" : ""));
+
   const fallbackMsg = hasTrack
     ? `No lyrics on file for "${t.title}". Catalog catches up over time.`
     : (bridge?.spotify
         ? "Press play on any track and Blue will tune in."
-        : "Connect Spotify to see your live track here.");
+        : "Connect Spotify or pick YouTube from the provider chips and I'll route through.");
 
   return (
     <div
       data-reveal
-      className={`live-player tilt-card ${hasTrack ? "is-active" : "is-idle"} ${isPlaying ? "is-playing" : ""}`}
+      className={`live-player tilt-card ${hasTrack ? "is-active" : "is-idle"} ${isPlaying ? "is-playing" : ""} ${isYouTube ? "is-youtube" : ""}`}
       data-tilt="card"
     >
-      {/* Blurred album art backdrop for cinematic depth */}
+      {/* Blurred backdrop — uses YouTube thumb when YT is active, otherwise
+          the album art. Falls back to the gradient idle backdrop. */}
       <div
         className="live-player__backdrop"
-        style={hasTrack && t.albumArt ? { backgroundImage: `url(${t.albumArt})` } : {}}
+        style={(() => {
+          const url = isYouTube
+            ? youtubeVideo?.thumbnail
+            : (hasTrack && t.albumArt ? t.albumArt : "");
+          return url ? { backgroundImage: `url(${url})` } : {};
+        })()}
       />
       <div className="live-player__veil" />
 
       <div className="live-player__inner">
         <div className="live-player__art">
-          <AlbumCover track={t} isPlaying={isPlaying} />
+          {isYouTube ? (
+            <YouTubeIFramePlayer
+              video={youtubeVideo}
+              onClose={() => setYoutubeVideo?.(null)}
+            />
+          ) : (
+            <AlbumCover track={t} isPlaying={isPlaying} />
+          )}
         </div>
 
         <div className="live-player__main">
           <div className="live-player__head">
             <p className="live-player__label">
               <span className="live-player__dot" />
-              {hasTrack ? (isPlaying ? "Now playing" : "Paused") : "Standing by"}
+              {hasTrack || isYouTube ? (isPlaying ? "Now playing" : "Paused") : "Standing by"}
+              {sourceLabel && (
+                <span className="live-player__source">{sourceLabel}</span>
+              )}
             </p>
             <h3 className="live-player__title" title={t.title || ""}>
-              {t.title || "Nothing playing yet"}
+              {t.title || (isYouTube ? youtubeVideo.title : "Nothing playing yet")}
             </h3>
             <p className="live-player__artist" title={t.artist || ""}>
-              {t.artist || "—"}
+              {t.artist || (isYouTube ? youtubeVideo.channel : "—")}
             </p>
           </div>
 
-          <ProgressBar playback={playback} isPlaying={isPlaying} />
+          {!isYouTube && <ProgressBar playback={playback} isPlaying={isPlaying} />}
 
           <div className="live-player__controls">
             <button
@@ -1266,7 +1373,7 @@ function LiveMusicPlayer({ track, lyrics, playback, isPlaying, onPlay, onPause, 
             >
               ⏭
             </button>
-            {!hasTrack && (
+            {!hasTrack && !isYouTube && (
               <button
                 type="button"
                 className="alive-button live-player__btn live-player__btn--primary"
@@ -1277,16 +1384,29 @@ function LiveMusicPlayer({ track, lyrics, playback, isPlaying, onPlay, onPause, 
                 Play recommendation
               </button>
             )}
+            {isYouTube && (
+              <button
+                type="button"
+                className="alive-button live-player__btn live-player__btn--ghost"
+                data-tilt="button"
+                onClick={() => setYoutubeVideo?.(null)}
+                title="Close YouTube"
+              >
+                Close YT
+              </button>
+            )}
           </div>
 
-          <div className="live-player__lyrics">
-            <LyricsView
-              lyrics={lyrics || { loading: false, synced: false, lines: [], plain: "" }}
-              playback={playback}
-              isPlaying={isPlaying}
-              fallbackText={fallbackMsg}
-            />
-          </div>
+          {!isYouTube && (
+            <div className="live-player__lyrics">
+              <LyricsView
+                lyrics={lyrics || { loading: false, synced: false, lines: [], plain: "" }}
+                playback={playback}
+                isPlaying={isPlaying}
+                fallbackText={fallbackMsg}
+              />
+            </div>
+          )}
         </div>
       </div>
 
@@ -1329,4 +1449,5 @@ window.AlbumCover = AlbumCover;
 window.LyricsView = LyricsView;
 window.ProgressBar = ProgressBar;
 window.LiveMusicPlayer = LiveMusicPlayer;
+window.YouTubeIFramePlayer = YouTubeIFramePlayer;
 window.setupReveal = setupReveal;

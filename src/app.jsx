@@ -1,5 +1,6 @@
 const STORAGE_KEY = "blue-listening-events-v3";
 const CONVERSATION_KEY = "blue-conversation-v1";
+const PROVIDER_KEY     = "blue-active-provider-v1";
 
 // MicWobble is declared via `function MicWobble` in components.jsx, which puts it
 // on the global scope. We don't redeclare it here — JSX <MicWobble /> resolves
@@ -164,14 +165,27 @@ function makeSpeechText(text="") {
 /* ── App ─────────────────────────────────────────────────────────────────── */
 function App() {
   const [events,       setEvents]       = React.useState(()=>loadJson(STORAGE_KEY,[]));
-  const [messages,     setMessages]     = React.useState(()=>loadJson(CONVERSATION_KEY,[{role:"blue",text:"Ayush, what's your mood today? I can talk music, recommend the next track, and play it through Spotify when the local bridge is connected."}]));
+  const [messages,     setMessages]     = React.useState(()=>loadJson(CONVERSATION_KEY,[{role:"blue",text:"Ayush, what's your mood today? I can talk music, recommend the next track, and play it through Spotify or YouTube."}]));
   const [mood,         setMood]         = React.useState("Electric");
-  const [bridge,       setBridge]       = React.useState({ok:false,llm:"ollama",llmOnline:false,spotify:false,mediaKeys:false});
+  const [bridge,       setBridge]       = React.useState({ok:false,llm:"ollama",llmOnline:false,spotify:false,mediaKeys:false,youtube:true,apple:false,streaming:false});
   const [currentTrack, setCurrentTrack] = React.useState(null);
   const [input,        setInput]        = React.useState("");
   const [listening,    setListening]    = React.useState(false);
   const [busy,         setBusy]         = React.useState(false);
   const [voices,       setVoices]       = React.useState(()=>("speechSynthesis" in window ? window.speechSynthesis.getVoices() : []));
+  // Continuous voice + streaming TTS state
+  const [liveTranscript, setLiveTranscript] = React.useState("");
+  const [activeProvider, setActiveProvider] = React.useState(()=>{
+    try { return localStorage.getItem(PROVIDER_KEY) || "auto"; } catch { return "auto"; }
+  });
+  React.useEffect(()=>{ try { localStorage.setItem(PROVIDER_KEY, activeProvider); } catch {} },[activeProvider]);
+  const [youtubeVideo,   setYoutubeVideo]   = React.useState(null);   // { videoId, title, ... }
+  const recRef          = React.useRef(null);
+  const recDesireRef    = React.useRef(false);
+  const speakingRef     = React.useRef(false);
+  const speechQueueRef  = React.useRef([]);
+  const voicesRef       = React.useRef(voices);
+  React.useEffect(() => { voicesRef.current = voices; }, [voices]);
   // Live-playback state — server polls every few seconds; the player extrapolates
   // locally between syncs using requestAnimationFrame, so visible progress and
   // lyric highlighting stay smooth without thrashing React state.
@@ -181,20 +195,30 @@ function App() {
   const recommendation = React.useMemo(()=>pickRecommendation(mood,events),[mood,events]);
 
   React.useEffect(()=>saveJson(STORAGE_KEY,events),[events]);
-  React.useEffect(()=>saveJson(CONVERSATION_KEY,messages.slice(-20)),[messages]);
+  // Persist messages but strip transient fields (_streaming, _id) so a refresh
+  // doesn't show a "streaming" bubble that will never finish.
+  React.useEffect(()=>{
+    const persistable = messages.slice(-20).map(({ _streaming, _id, ...rest }) => rest);
+    saveJson(CONVERSATION_KEY, persistable);
+  },[messages]);
   React.useEffect(()=>installTiltEffect(),[]);
 
-  // Force open at top — kill browser scroll restoration + any hash jump
+  // Force open at top — kill browser scroll restoration + any hash jump.
+  // We deliberately keep scroll-behavior:auto during the initial settle so
+  // the layout snaps to (0,0) instantly, then promote to smooth-scroll for
+  // anchor link clicks once the page has stabilised.
   React.useEffect(()=>{
     if ("scrollRestoration" in history) history.scrollRestoration = "manual";
-    // Strip any existing hash so the browser does not jump to it
     if (window.location.hash) {
       history.replaceState(null, "", window.location.pathname + window.location.search);
     }
     window.scrollTo(0, 0);
-    // Re-assert after layout settles in case something tries to scroll
     const guards = [50, 200, 500].map((ms) => setTimeout(()=>window.scrollTo(0,0), ms));
-    return ()=>guards.forEach(clearTimeout);
+    const enableSmooth = setTimeout(() => document.documentElement.classList.add("smooth-scroll"), 800);
+    return ()=>{
+      guards.forEach(clearTimeout);
+      clearTimeout(enableSmooth);
+    };
   },[]);
 
   // Boot GSAP reveal after first render
@@ -249,10 +273,19 @@ function App() {
       } catch {}
     };
     pollBridge(); pollRecent(); pollCurrent();
-    const bi = setInterval(pollBridge,30000);
-    const ri = setInterval(pollRecent, 30000);
-    const ci = setInterval(pollCurrent, 4000);
-    return ()=>{ clearInterval(bi); clearInterval(ri); clearInterval(ci); };
+    // Network polls are gated on document.visibilityState — if the tab is in
+    // the background, we skip the poll. This drops idle network/CPU to ~0
+    // while the user is in another tab and resumes instantly on focus.
+    const guarded = (fn) => () => { if (document.visibilityState === "visible") fn(); };
+    const bi = setInterval(guarded(pollBridge), 30000);
+    const ri = setInterval(guarded(pollRecent), 30000);
+    const ci = setInterval(guarded(pollCurrent), 4000);
+    const onVis = () => { if (document.visibilityState === "visible") { pollBridge(); pollCurrent(); } };
+    document.addEventListener("visibilitychange", onVis);
+    return ()=>{
+      clearInterval(bi); clearInterval(ri); clearInterval(ci);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   },[]);
 
   // Lyrics fetcher — keyed on title+artist so it only fires when the track
@@ -322,19 +355,71 @@ function App() {
 
   const previewAudioRef = React.useRef(null);
 
-  const speak = (text)=>{
+  /* ── Speech queue (per-sentence TTS with interruption support) ─────────
+     Streaming chat sends tokens as they arrive. Rather than waiting for the
+     full reply, we group tokens into sentences and queue each completed
+     sentence into SpeechSynthesis. Three properties matter:
+       • Interruption: when the user starts speaking, we drop the queue and
+         cancel the in-flight utterance.
+       • Echo protection: while TTS is speaking, we abort the mic so the
+         microphone doesn't pick up our own output. We resume after.
+       • Coherence: we never let two utterances overlap.
+     ────────────────────────────────────────────────────────────────────── */
+  const flushSpeechQueue = React.useCallback(() => {
     if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(makeSpeechText(text));
-    const v = chooseBlueVoice(voices);
+    if (speakingRef.current) return;
+    const next = speechQueueRef.current.shift();
+    if (!next) {
+      // Drained — if continuous mic was paused for TTS, restart it now.
+      if (recDesireRef.current && !recRef.current) {
+        setTimeout(() => spawnRecognitionRef.current?.(), 90);
+      }
+      return;
+    }
+    const u = new SpeechSynthesisUtterance(makeSpeechText(next));
+    const v = chooseBlueVoice(voicesRef.current);
     if (v) u.voice = v;
-    u.lang = v?.lang||"en-US";
-    // Slightly slower, gentler pitch — reads less robotic.
-    u.rate = 0.98;
-    u.pitch = 0.96;
+    u.lang   = v?.lang || "en-US";
+    u.rate   = 0.98;
+    u.pitch  = 0.96;
     u.volume = 0.94;
-    window.speechSynthesis.speak(u);
-  };
+    u.onstart = () => {
+      speakingRef.current = true;
+      // Pause continuous mic to avoid feedback. The recognition's onend
+      // won't auto-restart while speakingRef is true.
+      if (recRef.current) {
+        try { recRef.current.abort(); } catch {}
+        recRef.current = null;
+      }
+    };
+    u.onend = u.onerror = () => {
+      speakingRef.current = false;
+      flushSpeechQueue();
+    };
+    try { window.speechSynthesis.speak(u); }
+    catch { speakingRef.current = false; }
+  }, []);
+
+  const interruptSpeech = React.useCallback(() => {
+    if (!("speechSynthesis" in window)) return;
+    speechQueueRef.current = [];
+    try { window.speechSynthesis.cancel(); } catch {}
+    speakingRef.current = false;
+  }, []);
+
+  const enqueueSpeech = React.useCallback((text) => {
+    if (!text || !String(text).trim()) return;
+    if (!("speechSynthesis" in window)) return;
+    speechQueueRef.current.push(String(text));
+    flushSpeechQueue();
+  }, [flushSpeechQueue]);
+
+  const speak = React.useCallback((text) => {
+    interruptSpeech();
+    enqueueSpeech(text);
+  }, [enqueueSpeech, interruptSpeech]);
+
+  const spawnRecognitionRef = React.useRef(null);
 
   const playPreview = (url, track) => {
     if (!url) return false;
@@ -353,98 +438,338 @@ function App() {
     return true;
   };
 
-  // Direct, in-app playback. Tries Spotify first; falls back to a 30s preview
-  // so the user is NEVER bounced to the Spotify search page.
-  const playTrack = async(track)=>{
-    const query = (track && (track.query || `${track.title||""} ${track.artist||""}`.trim())) || recommendation.query;
-    if (!query) return;
+  /* ── Multi-provider playback ───────────────────────────────────────────
+     Routes through /api/music/play, which itself walks Spotify → YouTube →
+     preview based on what's connected and what fails. The frontend's job is
+     to render the right player engine for whichever provider responded.
+     ────────────────────────────────────────────────────────────────────── */
+  const playTrack = async (track, provider = "auto") => {
+    const query = (track && (track.query || `${track.title || ""} ${track.artist || ""}`.trim())) || recommendation.query;
+    if (!query && !track?.uri) return { ok: false };
     try {
-      const r = await fetch("/api/spotify/play",{
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({query, uri: track?.uri || undefined}),
-      }).then(r=>r.json());
+      const r = await fetch("/api/music/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query,
+          uri:    track?.uri    || undefined,
+          title:  track?.title  || undefined,
+          artist: track?.artist || undefined,
+          provider,
+        }),
+      }).then((r) => r.json());
 
-      if (r.ok && r.track) {
-        recordPlay(r.track,"Spotify");
+      // Spotify path
+      if (r.ok && r.provider === "spotify" && r.track) {
+        recordPlay(r.track, "Spotify");
+        // Clear any YouTube takeover so the Spotify-driven live player shows up
+        setYoutubeVideo(null);
         return { ok: true, mode: "spotify", device: r.device };
       }
 
-      // Spotify couldn't play (no device, no premium, etc). Use the preview audio.
-      if (r.previewUrl) {
-        const t = r.track || track;
-        if (t) recordPlay({...t, source:"Preview"}, "Preview");
-        playPreview(r.previewUrl, t);
-        const note = `No active Spotify device, so I'm running a 30-second preview here. Open Spotify on a device for the full track.`;
-        setMessages(old=>[...old,{role:"blue",text:note}]);
-        speak(note);
+      // YouTube path — frontend mounts the IFrame player
+      if (r.ok && r.provider === "youtube" && r.youtube?.videoId) {
+        setYoutubeVideo(r.youtube);
+        const t = r.track || {
+          title:  r.youtube.title  || track?.title  || query,
+          artist: r.youtube.channel || track?.artist || "",
+          query,
+          albumArt: r.youtube.thumbnail || "",
+          source: "YouTube",
+        };
+        recordPlay(t, "YouTube");
+        return { ok: true, mode: "youtube", videoId: r.youtube.videoId };
+      }
+
+      // Preview fallback
+      const previewUrl = r.previewUrl
+        || r.attempts?.find?.((a) => a?.previewUrl)?.previewUrl;
+      if (previewUrl) {
+        const t = r.track
+          || r.attempts?.find?.((a) => a?.track)?.track
+          || track;
+        if (t) recordPlay({ ...t, source: "Preview" }, "Preview");
+        playPreview(previewUrl, t);
+        const note = "No active Spotify device — running a 30-second preview here. Open Spotify on any device for the full track.";
+        setMessages((old) => [...old, { role: "blue", text: note }]);
+        enqueueSpeech(note);
         return { ok: true, mode: "preview" };
       }
 
-      const note = r.error || "I couldn't start playback. Open Spotify on a device and I'll route through it.";
-      setMessages(old=>[...old,{role:"blue",text:note}]);
-      speak(note);
+      // Apple Music wants client-side authorization
+      if (r.attempts?.some?.((a) => a?.apple?.needsClientAuth)) {
+        const note = "Apple Music is wired up but I need you to sign in once from the player to start playback.";
+        setMessages((old) => [...old, { role: "blue", text: note }]);
+        enqueueSpeech(note);
+        return { ok: false, mode: "apple-needs-auth" };
+      }
+
+      const note = r.error
+        || r.attempts?.find?.((a) => a?.error)?.error
+        || "I couldn't start playback. Open Spotify on a device or switch to YouTube and I'll route through.";
+      setMessages((old) => [...old, { role: "blue", text: note }]);
+      enqueueSpeech(note);
       return { ok: false };
     } catch {
-      const note = "Lost the bridge to Spotify. Reconnect from the Connect button up top and try again.";
-      setMessages(old=>[...old,{role:"blue",text:note}]);
-      speak(note);
+      const note = "Lost the bridge to playback. Refresh, or reconnect Spotify from the top bar.";
+      setMessages((old) => [...old, { role: "blue", text: note }]);
+      enqueueSpeech(note);
       return { ok: false };
     }
   };
 
-  const sendToBlue = async(rawText=input)=>{
-    const text = rawText.trim();
-    if (!text||busy) return;
-    setBusy(true); setInput("");
-    const userMsg = {role:"user",text};
-    const nextMessages = [...messages, userMsg];
-    setMessages(nextMessages);
-    try {
-      const r = await fetch("/api/chat",{
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          message: text,
-          history: nextMessages.slice(-8),
-          context: {
-            mood, recommendation, currentTrack,
-            topGenre: stats.topGenre, topArtist: stats.topArtist,
-            recent: events.slice(0,12),
-          },
-        }),
-      }).then(r=>r.json());
-      const nextMood = r.mood||inferMood(text);
-      setMood(nextMood);
-      const reply = r.reply||`For ${nextMood.toLowerCase()}, I'd put on ${recommendation.title}. Want it?`;
-      setMessages(old=>[...old,{role:"blue",text:reply}]);
-      speak(reply);
-      if (r.action==="play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text)) {
-        // Prefer the model's chosen track, else current track when user said "play this", else recommendation.
-        const sayingThis = /\b(this|that|it)\b/i.test(text);
-        const target =
-          (r.track && (r.track.title || r.track.query) ? r.track : null) ||
-          (sayingThis && currentTrack ? currentTrack : null) ||
-          { ...recommendation, title: r.playQuery || recommendation.title, query: r.playQuery || recommendation.query };
-        await playTrack(target);
+  /* ── Streaming chat over SSE ────────────────────────────────────────────
+     The new path: POST /api/chat/stream → reads SSE events, appends tokens
+     to a streaming bubble, and pipes complete sentences into the speech
+     queue. The reply you see and the reply you hear are the same buffer,
+     drip-fed at speech speed — no waiting for the whole response.
+     Falls back to non-streaming /api/chat if the stream errors.
+     ────────────────────────────────────────────────────────────────────── */
+  const streamChat = async (text, history, context) => {
+    const placeholderId = `blue-stream-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+    setMessages((old)=>[...old, { role: "blue", text: "", _id: placeholderId, _streaming: true }]);
+
+    const updatePlaceholder = (textValue, streaming = true) => {
+      setMessages((old) => {
+        // Walk from end to find the streaming placeholder.
+        for (let i = old.length - 1; i >= 0; i--) {
+          if (old[i]._id === placeholderId) {
+            const next = old.slice();
+            next[i] = { ...next[i], text: textValue, _streaming: streaming };
+            return next;
+          }
+        }
+        return old;
+      });
+    };
+
+    let assembled = "";
+    let lastSpoken = 0;
+    let finalPayload = null;
+    const sentenceRe = /[^.!?…\n]+[.!?…]+|\n/g;
+
+    const speakBoundaries = () => {
+      const tail = assembled.slice(lastSpoken);
+      sentenceRe.lastIndex = 0;
+      let consumed = 0;
+      let m;
+      while ((m = sentenceRe.exec(tail)) !== null) {
+        const sentence = m[0].trim();
+        if (sentence) enqueueSpeech(sentence);
+        consumed = m.index + m[0].length;
       }
-    } catch {
-      const reply = `Running in local mode. For ${mood.toLowerCase()}, I'd play ${recommendation.title} by ${recommendation.artist}. Want it?`;
-      setMessages(old=>[...old,{role:"blue",text:reply}]);
-      speak(reply);
-    } finally { setBusy(false); }
+      lastSpoken += consumed;
+    };
+
+    const r = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, history, context }),
+    });
+    if (!r.ok || !r.body) throw new Error(`Stream failed: ${r.status}`);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        if (!block.trim()) continue;
+        let event = "message", data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith(":")) continue;
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trimStart();
+        }
+        let parsed; try { parsed = JSON.parse(data); } catch { continue; }
+        if (event === "token" && parsed?.text) {
+          assembled += parsed.text;
+          updatePlaceholder(assembled);
+          speakBoundaries();
+        } else if (event === "done") {
+          finalPayload = parsed;
+        }
+      }
+    }
+
+    // Speak any remaining tail without terminal punctuation
+    if (lastSpoken < assembled.length) {
+      const tail = assembled.slice(lastSpoken).trim();
+      if (tail) enqueueSpeech(tail);
+    }
+
+    // Mark the bubble as no longer streaming + ensure final reply is set
+    const finalText = (finalPayload?.reply && finalPayload.reply.length > assembled.length)
+      ? finalPayload.reply : assembled;
+    updatePlaceholder(finalText, false);
+    return finalPayload || { reply: finalText };
   };
 
-  const startVoice = ()=>{
-    const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
-    if (!SR) { const reply="This browser does not expose speech recognition, but you can type to me."; setMessages(old=>[...old,{role:"blue",text:reply}]); speak(reply); return; }
-    const r = new SR(); r.lang="en-US"; r.interimResults=false; r.maxAlternatives=1;
-    setListening(true);
-    r.onresult = (e)=>sendToBlue(e.results[0][0].transcript);
-    r.onend    = ()=>setListening(false);
-    r.onerror  = ()=>setListening(false);
-    r.start();
+  const sendToBlue = async (rawText = input) => {
+    const text = String(rawText || "").trim();
+    if (!text || busy) return;
+    setBusy(true); setInput("");
+
+    // User message in immediately, interrupt any in-flight TTS
+    interruptSpeech();
+    const userMsg = { role: "user", text };
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
+
+    const context = {
+      mood, recommendation, currentTrack,
+      topGenre: stats.topGenre, topArtist: stats.topArtist,
+      provider: activeProvider,
+      recent: events.slice(0, 12),
+    };
+
+    try {
+      const final = await streamChat(text, nextMessages.slice(-8), context);
+      if (final) {
+        if (final.mood) setMood(final.mood);
+        if (final.action === "play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text)) {
+          const sayingThis = /\b(this|that|it)\b/i.test(text);
+          const target =
+            (final.track && (final.track.title || final.track.query) ? final.track : null) ||
+            (sayingThis && currentTrack ? currentTrack : null) ||
+            { ...recommendation, title: final.playQuery || recommendation.title, query: final.playQuery || recommendation.query };
+          await playTrack(target, final.provider || activeProvider);
+        }
+      }
+    } catch (streamError) {
+      // Stream broke — fall back to non-streaming /api/chat once
+      try {
+        const r = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, history: nextMessages.slice(-8), context }),
+        }).then((r) => r.json());
+        const nextMood = r.mood || inferMood(text);
+        setMood(nextMood);
+        const reply = r.reply || `For ${nextMood.toLowerCase()}, I'd put on ${recommendation.title}. Want it?`;
+        setMessages((old) => [...old, { role: "blue", text: reply }]);
+        speak(reply);
+        if (r.action === "play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text)) {
+          const sayingThis = /\b(this|that|it)\b/i.test(text);
+          const target =
+            (r.track && (r.track.title || r.track.query) ? r.track : null) ||
+            (sayingThis && currentTrack ? currentTrack : null) ||
+            { ...recommendation, title: r.playQuery || recommendation.title, query: r.playQuery || recommendation.query };
+          await playTrack(target, r.provider || activeProvider);
+        }
+      } catch {
+        const reply = `Running in local mode. For ${mood.toLowerCase()}, I'd play ${recommendation.title} by ${recommendation.artist}. Want it?`;
+        setMessages((old) => [...old, { role: "blue", text: reply }]);
+        speak(reply);
+      }
+    } finally {
+      setBusy(false);
+    }
   };
+
+  /* ── Continuous voice ─────────────────────────────────────────────────
+     Pressing the mic toggles on/off. While on, the recognizer auto-restarts
+     across natural speech segments (Chrome ends a session after ~60s of
+     silence). Interim transcripts feed a live caption so the user can see
+     what Blue is hearing. A short silence detector commits the buffer to
+     sendToBlue once the user stops talking.
+     ────────────────────────────────────────────────────────────────────── */
+  const stopVoice = React.useCallback(() => {
+    recDesireRef.current = false;
+    setListening(false);
+    setLiveTranscript("");
+    if (recRef.current) {
+      try { recRef.current.abort(); } catch {}
+      recRef.current = null;
+    }
+  }, []);
+
+  const spawnRecognition = React.useCallback(() => {
+    if (!recDesireRef.current) return;
+    if (recRef.current) return;
+    if (speakingRef.current) return; // wait for TTS to finish; flushSpeechQueue will retrigger
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = true;
+    rec.maxAlternatives = 1;
+    recRef.current = rec;
+    setListening(true);
+
+    let silenceTimer = null;
+    let buffer = "";
+
+    rec.onresult = (e) => {
+      if (speakingRef.current) return;
+      let interim = "", final = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) final += r[0].transcript;
+        else interim += r[0].transcript;
+      }
+      const visible = (interim || final).trim();
+      setLiveTranscript(visible);
+      if (final && final.trim()) {
+        // The user is talking — interrupt any in-flight TTS so they aren't
+        // talked over.
+        if (speechQueueRef.current.length || speakingRef.current) interruptSpeech();
+        buffer += " " + final;
+        clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+          const text = buffer.trim();
+          buffer = "";
+          setLiveTranscript("");
+          if (text) sendToBlue(text);
+        }, 850);
+      }
+    };
+    rec.onend = () => {
+      recRef.current = null;
+      // Auto-restart only if user still wants the mic on AND TTS isn't
+      // playing (TTS resume handles the post-speech restart).
+      if (recDesireRef.current && !speakingRef.current) {
+        setTimeout(() => spawnRecognitionRef.current?.(), 80);
+      } else if (!recDesireRef.current) {
+        setListening(false);
+      }
+    };
+    rec.onerror = (e) => {
+      // Permissions errors are terminal; transient errors just let onend
+      // handle restart.
+      if (e?.error === "not-allowed" || e?.error === "service-not-allowed") {
+        recDesireRef.current = false;
+        setListening(false);
+      }
+    };
+    try { rec.start(); }
+    catch { recRef.current = null; }
+  }, [interruptSpeech]);
+
+  React.useEffect(() => { spawnRecognitionRef.current = spawnRecognition; }, [spawnRecognition]);
+
+  const startVoice = React.useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      const reply = "This browser does not expose speech recognition, but you can type to me.";
+      setMessages((old) => [...old, { role: "blue", text: reply }]);
+      enqueueSpeech(reply);
+      return;
+    }
+    if (recDesireRef.current || listening) {
+      stopVoice();
+      return;
+    }
+    recDesireRef.current = true;
+    spawnRecognition();
+  }, [enqueueSpeech, listening, spawnRecognition, stopVoice]);
 
   const mediaKey = async(action)=>fetch("/api/system/media",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action})}).catch(()=>{});
 
@@ -477,10 +802,12 @@ function App() {
           stats={stats} events={events} messages={messages}
           input={input} setInput={setInput} mood={mood} setMood={setMood}
           recommendation={recommendation} currentTrack={currentTrack} bridge={bridge}
-          busy={busy} listening={listening}
+          busy={busy} listening={listening} liveTranscript={liveTranscript}
+          activeProvider={activeProvider} setActiveProvider={setActiveProvider}
+          youtubeVideo={youtubeVideo} setYoutubeVideo={setYoutubeVideo}
           playback={playback} lyrics={lyrics}
           onSubmit={()=>sendToBlue()} onVoice={startVoice}
-          onPlay={()=>playTrack(recommendation)} onMedia={mediaKey}
+          onPlay={()=>playTrack(recommendation, activeProvider)} onMedia={mediaKey}
         />
       </main>
     </>
@@ -615,7 +942,7 @@ function CapabilityCard({ card, index }) {
 }
 
 /* ── Dashboard panel ─────────────────────────────────────────────────────── */
-function DashboardPanel({ stats, events, messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, playback, lyrics, onSubmit, onVoice, onPlay, onMedia }) {
+function DashboardPanel({ stats, events, messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, liveTranscript, activeProvider, setActiveProvider, youtubeVideo, setYoutubeVideo, playback, lyrics, onSubmit, onVoice, onPlay, onMedia }) {
   return (
     <div id="dashboard" className="dashboard-stage mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[1fr_460px]">
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -627,6 +954,10 @@ function DashboardPanel({ stats, events, messages, input, setInput, mood, setMoo
             playback={playback}
             isPlaying={playback?.isPlaying}
             bridge={bridge}
+            activeProvider={activeProvider}
+            setActiveProvider={setActiveProvider}
+            youtubeVideo={youtubeVideo}
+            setYoutubeVideo={setYoutubeVideo}
             onPlay={onPlay}
             onPause={()=>onMedia("playpause")}
             onNext={()=>onMedia("next")}
@@ -664,7 +995,9 @@ function DashboardPanel({ stats, events, messages, input, setInput, mood, setMoo
         messages={messages} input={input} setInput={setInput}
         mood={mood} setMood={setMood} recommendation={recommendation}
         currentTrack={currentTrack} bridge={bridge} busy={busy}
-        listening={listening} onSubmit={onSubmit} onVoice={onVoice}
+        listening={listening} liveTranscript={liveTranscript}
+        activeProvider={activeProvider} setActiveProvider={setActiveProvider}
+        onSubmit={onSubmit} onVoice={onVoice}
         onPlay={onPlay} onMedia={onMedia}
       />
     </div>
@@ -683,7 +1016,7 @@ function Signal({ label, value }) {
 /* ══════════════════════════════════════════════════════════════════════════
    Agent Console — redesigned professional UI
 ══════════════════════════════════════════════════════════════════════════ */
-function AgentConsole({ messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, onSubmit, onVoice, onPlay, onMedia }) {
+function AgentConsole({ messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, liveTranscript, activeProvider, setActiveProvider, onSubmit, onVoice, onPlay, onMedia }) {
   const bottomRef = React.useRef(null);
   const messagesRef = React.useRef(null);
   const didMountRef = React.useRef(false);
@@ -694,7 +1027,11 @@ function AgentConsole({ messages, input, setInput, mood, setMood, recommendation
     if (!didMountRef.current) { didMountRef.current = true; return; }
     const c = messagesRef.current;
     if (c) c.scrollTop = c.scrollHeight;
-  },[messages,busy]);
+  },[messages,busy,liveTranscript]);
+
+  // Are any messages still streaming? If yes, suppress the typing indicator
+  // (the streaming bubble itself shows progress).
+  const anyStreaming = messages.some((m) => m && m._streaming);
 
   return (
     <section id="blue-agent" data-reveal className="agent-shell relative overflow-hidden rounded-[1.25rem]" data-tilt="card">
@@ -705,6 +1042,13 @@ function AgentConsole({ messages, input, setInput, mood, setMood, recommendation
 
         {/* ── Now playing ── */}
         <NowPlayingWidget currentTrack={currentTrack} recommendation={recommendation} onPlay={onPlay} onMedia={onMedia} />
+
+        {/* ── Provider switcher ── */}
+        <ProviderSwitcher
+          activeProvider={activeProvider}
+          setActiveProvider={setActiveProvider}
+          bridge={bridge}
+        />
 
         {/* ── Mood selector ── */}
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -730,20 +1074,55 @@ function AgentConsole({ messages, input, setInput, mood, setMood, recommendation
             list absorbs extra height on tall layouts. ── */}
         <div ref={messagesRef} className="agent-messages flex flex-1 flex-col gap-3 overflow-y-auto pr-1" style={{minHeight:200}}>
           {messages.slice(-12).map((msg,i)=>(
-            <MessageBubble key={`${msg.role}-${i}`} message={msg} />
+            <MessageBubble key={msg._id || `${msg.role}-${i}`} message={msg} />
           ))}
-          {busy && <TypingIndicator />}
+          {busy && !anyStreaming && <TypingIndicator />}
           <div ref={bottomRef} />
         </div>
 
         {/* ── Input bar ── */}
         <ChatInputBar
           input={input} setInput={setInput} busy={busy}
-          listening={listening} onSubmit={onSubmit} onVoice={onVoice}
+          listening={listening} liveTranscript={liveTranscript}
+          onSubmit={onSubmit} onVoice={onVoice}
         />
 
       </div>
     </section>
+  );
+}
+
+/* ── Provider switcher ──────────────────────────────────────────────────── */
+function ProviderSwitcher({ activeProvider, setActiveProvider, bridge }) {
+  const providers = [
+    { id: "auto",    label: "Auto",    available: true,                                hint: "Best available" },
+    { id: "spotify", label: "Spotify", available: !!bridge.spotify,                    hint: bridge.spotify ? "Connected" : "Connect Spotify up top" },
+    { id: "youtube", label: "YouTube", available: bridge.youtube !== false,            hint: bridge.youtubeKeyed ? "API key set" : "Public search" },
+    { id: "apple",   label: "Apple",   available: !!bridge.apple,                      hint: bridge.apple ? "Ready" : "Needs setup (see README)" },
+  ];
+  return (
+    <div className="mt-3 flex flex-wrap gap-1.5" role="tablist" aria-label="Music provider">
+      {providers.map((p) => {
+        const active = (activeProvider || "auto") === p.id;
+        const cls = active
+          ? "provider-chip provider-chip--active"
+          : (p.available ? "provider-chip provider-chip--idle" : "provider-chip provider-chip--off");
+        return (
+          <button
+            key={p.id}
+            role="tab"
+            aria-selected={active}
+            disabled={!p.available && !active}
+            title={p.hint}
+            onClick={() => setActiveProvider?.(p.id)}
+            className={`alive-button ${cls}`}
+          >
+            <span className="provider-chip__dot" />
+            {p.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -812,6 +1191,8 @@ function NowPlayingWidget({ currentTrack, recommendation, onPlay, onMedia }) {
 
 function MessageBubble({ message }) {
   const isUser = message.role === "user";
+  const streaming = !!message._streaming;
+  const empty = !message.text || !String(message.text).trim();
   return (
     <div className={`msg-enter flex gap-2.5 ${isUser?"justify-end":""}`}>
       {!isUser && (
@@ -822,7 +1203,14 @@ function MessageBubble({ message }) {
           ? "rounded-tr-[4px] bg-white text-black"
           : "liquid-glass rounded-tl-[4px] text-white/90"
       }`}>
-        {message.text}
+        {empty && streaming ? (
+          <span className="streaming-dots"><span /><span /><span /></span>
+        ) : (
+          <>
+            {message.text}
+            {streaming && <span className="streaming-cursor" aria-hidden="true" />}
+          </>
+        )}
       </div>
     </div>
   );
@@ -844,22 +1232,23 @@ function TypingIndicator() {
   );
 }
 
-function ChatInputBar({ input, setInput, busy, listening, onSubmit, onVoice }) {
+function ChatInputBar({ input, setInput, busy, listening, liveTranscript, onSubmit, onVoice }) {
   return (
     <form className="mt-4" onSubmit={(e)=>{ e.preventDefault(); onSubmit(); }}>
       <div className="chat-input-wrap flex items-center gap-2 overflow-hidden rounded-[0.875rem] px-3 py-2 transition-all duration-200" style={{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.09)"}}>
         <input
           value={input}
           onChange={(e)=>setInput(e.target.value)}
-          placeholder="Tell Blue your mood or ask for a song…"
+          placeholder={listening ? "Listening… or type to interrupt" : "Tell Blue your mood or ask for a song…"}
           className="chat-input min-w-0 flex-1 bg-transparent py-1.5 font-body text-sm text-white placeholder:text-white/30"
         />
-        {/* Mic — listening state shows the dispersed-pixel wobble in place of a static ring */}
+        {/* Mic — toggle. Hot state shows the wobble particle visualization. */}
         <button
           type="button"
           onClick={onVoice}
-          title="Voice input"
-          aria-label={listening ? "Stop voice input" : "Start voice input"}
+          title={listening ? "Stop continuous voice" : "Start continuous voice"}
+          aria-label={listening ? "Stop continuous voice" : "Start continuous voice"}
+          aria-pressed={listening}
           className={`mic-btn relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-all duration-200 ${listening?"mic-btn--listening":"alive-button liquid-glass text-white"}`}
         >
           {listening && <MicWobble active={listening} />}
@@ -881,10 +1270,18 @@ function ChatInputBar({ input, setInput, busy, listening, onSubmit, onVoice }) {
           ) : "Send →"}
         </button>
       </div>
+
+      {/* Live caption — shows interim transcript while voice is hot */}
       {listening && (
-        <p className="mt-2 text-center font-body text-xs" style={{color:"rgba(255,228,77,0.85)"}}>
-          Listening… speak now
-        </p>
+        <div className="live-caption mt-2 flex items-center gap-2 rounded-[0.75rem] px-3 py-2" role="status" aria-live="polite">
+          <span className="live-caption__dots">
+            <span /><span /><span />
+          </span>
+          <span className="live-caption__label">Listening</span>
+          <span className="live-caption__text">
+            {liveTranscript ? `“${liveTranscript}”` : "Speak naturally — mic stays on until you press it again."}
+          </span>
+        </div>
       )}
     </form>
   );
