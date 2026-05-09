@@ -102,6 +102,89 @@ If any of those creds are missing, Apple stays a dim chip with a "Needs setup" t
   with confidence scores. Falls back to iTunes Search and MusicBrainz when
   artist genres aren't enough.
 
+## Agent mode (Phase 1 — tool calling)
+
+Blue can run as a tool-calling agent: instead of producing JSON the server has to interpret, the model directly calls server-side tools (`play_track`, `queue_track`, `recall_memory`, `plan_session`, etc.) and the loop feeds results back until it produces a final reply.
+
+Enable it:
+
+```env
+BLUE_AGENT_TOOLS=1
+```
+
+Requires a tool-capable model (most modern Ollama models support tools — `qwen2.5`, `llama3.1`, `llama3.2`, `mistral`, `phi4`). If the active model rejects tools, Blue falls back to JSON mode automatically and remembers for the rest of the session.
+
+The eight tools are documented in `src/server/agent/tools.js`. The agent loop is capped at 5 iterations per turn.
+
+## Long-term memory (Phase 1)
+
+Two files persist alongside `.blue-state.json`:
+
+- `.blue-events.jsonl` — append-only event log (plays, skips, likes, moods, preferences). Drives the `recall_memory` tool and Phase 3 dashboard.
+- `.blue-vector-memory.jsonl` — embedded preferences/moods/likes for semantic recall.
+
+Embeddings come from Ollama. Pull the embedding model once:
+
+```powershell
+ollama pull nomic-embed-text
+```
+
+If you skip this, Blue still records events — `recall_memory` just falls back to keyword + recency search instead of semantic similarity.
+
+New endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET  | `/api/events?types=play,skip&since=...&limit=...` | Read raw event log |
+| POST | `/api/events` | Append an event (`{type, ...payload}`) |
+| GET  | `/api/memory/stats` | Vector store size + per-type breakdown |
+| POST | `/api/memory/search` | Recall: `{query, k?, types?}` |
+
+## Music intelligence (Phase 2)
+
+### Lyric semantic search
+
+Every time Blue fetches lyrics from LRCLIB, each timestamped line is embedded into the vector store (type `lyric`). You can then ask Blue *"play the song with the line about driving at night"* — it calls `find_lyric_line`, finds the match, and queues the track at the correct timestamp.
+
+```
+POST /api/lyrics/search { "query": "driving at night", "k": 5 }
+→ { ok, results: [{ title, artist, line, timestamp, score }, ...] }
+```
+
+### Mood & context engine
+
+Blue can factor in real-world signal — time of day, weather, upcoming calendar events — when it picks music. The agent has a `get_context` tool, and a one-line summary is also injected into every system prompt.
+
+Set in `.env` (all optional):
+
+```env
+BLUE_USER_LAT=12.97       # Open-Meteo (no key required)
+BLUE_USER_LON=77.59
+BLUE_ICS_PATH=C:\path\to\calendar.ics   # local ICS file (optional)
+```
+
+Without `LAT`/`LON` weather is skipped silently. Time of day always works.
+
+### Audio analysis sidecar (BPM + key)
+
+A separate Python process exposes BPM, musical key (Camelot wheel), and energy detection on YouTube tracks. The agent's `analyze_track` tool calls into it. The sidecar is optional — Blue degrades to "audio sidecar not running" when it's absent.
+
+```powershell
+# one-time setup
+python -m venv .venv-audio
+.venv-audio\Scripts\pip install librosa numpy soundfile yt-dlp
+
+# run alongside Blue
+.venv-audio\Scripts\python scripts\audio_analyzer.py
+```
+
+Tracks are downloaded to `.blue-audio-cache/` and analyses are cached in `.blue-audio-analysis.json` so each track is only analyzed once.
+
+```
+POST /api/audio/analyze { "query": "Coldplay Yellow" }
+→ { bpm, key, camelot, beats_sec, rms_energy, ... }
+```
+
 ## Environment variables
 
 ```env
@@ -130,6 +213,19 @@ YOUTUBE_API_KEY=
 APPLE_TEAM_ID=
 APPLE_KEY_ID=
 APPLE_PRIVATE_KEY=
+
+# Agent / memory (Phase 1)
+BLUE_AGENT_TOOLS=0           # set to 1 to enable tool-calling agent loop
+BLUE_EMBED_MODEL=nomic-embed-text
+
+# Context engine (Phase 2)
+BLUE_USER_LAT=                # for weather via Open-Meteo
+BLUE_USER_LON=
+BLUE_ICS_PATH=                # path to a local .ics calendar (optional)
+
+# Audio sidecar (Phase 2)
+BLUE_AUDIO_URL=http://127.0.0.1:4178
+BLUE_AUDIO_PORT=4178
 ```
 
 ## Recommended Ollama models

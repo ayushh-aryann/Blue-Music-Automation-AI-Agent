@@ -4,6 +4,8 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/server/index.js",
+    "start:legacy": "node server.js",
+    "smoke": "node scripts/smoke.js"
   }
 }
