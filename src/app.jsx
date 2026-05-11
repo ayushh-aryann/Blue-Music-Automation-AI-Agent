@@ -633,7 +633,33 @@ function App() {
       const final = await streamChat(text, nextMessages.slice(-8), context);
       if (final) {
         if (final.mood) setMood(final.mood);
-        if (final.action === "play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text)) {
+        // If the agent already played the track via its play_track tool,
+        // do NOT make a second /api/music/play call from the frontend —
+        // that's a different code path with its own provider fallback that
+        // would override the agent's choice (e.g. play on Spotify instead
+        // of the YouTube the user asked for).
+        const agentPlayEvent = Array.isArray(final.toolEvents)
+          ? final.toolEvents.find((e) => e.tool === "play_track" && e.ok)
+          : null;
+        if (agentPlayEvent) {
+          const result = agentPlayEvent.result || {};
+          if (result.provider === "youtube" && result.youtube?.videoId) {
+            setYoutubeVideo(result.youtube);
+            const ytTrack = result.track || {
+              title:    result.youtube.title    || final.playQuery || "",
+              artist:   result.youtube.channel  || "",
+              query:    final.playQuery         || "",
+              albumArt: result.youtube.thumbnail || "",
+              source:   "YouTube",
+            };
+            recordPlay(ytTrack, "YouTube");
+          } else if (result.provider === "spotify" && result.track) {
+            setYoutubeVideo(null);
+            recordPlay(result.track, "Spotify");
+          }
+        }
+        if (!agentPlayEvent
+            && (final.action === "play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text))) {
           const sayingThis = /\b(this|that|it)\b/i.test(text);
           const target =
             (final.track && (final.track.title || final.track.query) ? final.track : null) ||
@@ -655,7 +681,10 @@ function App() {
         const reply = r.reply || `For ${nextMood.toLowerCase()}, I'd put on ${recommendation.title}. Want it?`;
         setMessages((old) => [...old, { role: "blue", text: reply }]);
         speak(reply);
-        if (r.action === "play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text)) {
+        const agentAlreadyPlayed = Array.isArray(r.toolEvents)
+          && r.toolEvents.some((e) => e.tool === "play_track" && e.ok);
+        if (!agentAlreadyPlayed
+            && (r.action === "play" || /\b(play|start|queue|put on|spin|throw on|hit)\b/i.test(text))) {
           const sayingThis = /\b(this|that|it)\b/i.test(text);
           const target =
             (r.track && (r.track.title || r.track.query) ? r.track : null) ||

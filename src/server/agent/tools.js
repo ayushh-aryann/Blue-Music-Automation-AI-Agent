@@ -32,13 +32,13 @@ const toolSchemas = [
     type: "function",
     function: {
       name: "play_track",
-      description: "Start playback of a track. Use this whenever the user asks to play something. Provider auto-falls-back across Spotify, YouTube, Apple.",
+      description: "Start playback of a track. Use this whenever the user asks to play something. IMPORTANT: query MUST be the actual 'title artist' of the song — never pronouns like 'this' or 'that song'. If the user says 'play this on X', use the Currently playing title+artist from your context as the query. Provider rules: pass 'auto' to let Blue pick (Spotify → YouTube → Apple). Pass an explicit provider ('spotify' / 'youtube' / 'apple') ONLY when the user names it — and in that case Blue will NOT fall back to other providers.",
       parameters: {
         type: "object",
         properties: {
-          query:    { type: "string", description: "Free-form 'title artist' query. Required unless uri is given." },
+          query:    { type: "string", description: "Full 'title artist' query. Resolve pronouns from context — never pass 'this', 'that', or empty." },
           uri:      { type: "string", description: "Spotify URI if you already have one." },
-          provider: { type: "string", enum: ["auto", "spotify", "youtube", "apple"], description: "Default auto." },
+          provider: { type: "string", enum: ["auto", "spotify", "youtube", "apple"], description: "Default auto. Only set explicitly if the user named a provider." },
         },
         required: ["query"],
       },
@@ -63,7 +63,7 @@ const toolSchemas = [
     type: "function",
     function: {
       name: "search_tracks",
-      description: "Search for tracks across providers. Use to look up something before playing if the user is vague.",
+      description: "Search for tracks ONLY when the user explicitly wants a LIST of options (e.g. 'find me some songs like X', 'what are the top Coldplay tracks'). DO NOT use search_tracks when the user wants to play music — call play_track directly instead. play_track already handles vague queries internally. Listing results in your text reply is NOT playing.",
       parameters: {
         type: "object",
         properties: {
@@ -196,6 +196,20 @@ const toolSchemas = [
 // `__action` shape (action, track, playQuery) so the chat route can
 // reconstruct the legacy SSE done payload the existing frontend expects.
 async function play_track({ query, uri, provider = "auto" }) {
+  // Reject obviously-bad queries before they hit any provider. The model
+  // sometimes passes pronouns ("this", "that", "the song") which Spotify's
+  // search will happily match against a random unrelated track.
+  const q = String(query || "").trim();
+  if (provider !== "auto" || !uri) {
+    if (!uri && /^(this|that|it|the song|current(ly)? playing)?$/i.test(q)) {
+      return {
+        ok: false,
+        provider,
+        error: "I don't know which song to play — tell me the title and artist.",
+      };
+    }
+  }
+
   // Try providers in order. Unlike musicPlay (HTTP route), runProviderPlay
   // returns {ok:false, error} for soft failures (no device, no token), and
   // only THROWS for transport errors. We need to honor both — checking
@@ -203,9 +217,20 @@ async function play_track({ query, uri, provider = "auto" }) {
   // Skip Spotify entirely once we've confirmed the dev-app lockout — it'll
   // just 403 again. The user will get a single tool round trip on YouTube.
   const skipSpotify = isSpotifyAppLockedOut();
-  const order = provider === "auto"
-    ? (skipSpotify ? ["youtube", "apple"] : ["spotify", "youtube", "apple"])
-    : (skipSpotify && provider === "spotify" ? ["youtube"] : [provider, "spotify", "youtube"]);
+  let order;
+  if (provider === "auto") {
+    order = skipSpotify ? ["youtube", "apple"] : ["spotify", "youtube", "apple"];
+  } else if (skipSpotify && provider === "spotify") {
+    // User asked for Spotify but it's locked out — degrade to YouTube once,
+    // don't try other providers silently.
+    order = ["youtube"];
+  } else {
+    // User named a provider — honor it strictly. No silent fallback to other
+    // services, because they'd play the wrong song against a wrong-context
+    // query (e.g. "play this on YouTube" → falling through to Spotify search
+    // matches against a random track).
+    order = [provider];
+  }
 
   let lastResult = null;
   let lastErrors = [];
@@ -280,11 +305,14 @@ async function queue_track({ query, uri }) {
   }
 }
 
-async function search_tracks({ query, provider = "auto", limit = 5 }) {
+async function search_tracks({ query, provider = "auto", limit }) {
+  // Coerce nulls and bad values — some models pass `limit: null` which would
+  // break the `results.length < limit` checks below.
+  const lim = (typeof limit === "number" && limit > 0) ? Math.min(10, limit) : 5;
   const out = { ok: true, results: [] };
   if (provider === "spotify" || provider === "auto") {
     try {
-      const r = await spotifyFetch(`/search?type=track&limit=${Math.min(10, limit)}&q=${encodeURIComponent(query)}`);
+      const r = await spotifyFetch(`/search?type=track&limit=${lim}&q=${encodeURIComponent(query)}`);
       for (const t of r?.tracks?.items || []) {
         out.results.push({
           provider: "spotify",
@@ -295,10 +323,10 @@ async function search_tracks({ query, provider = "auto", limit = 5 }) {
       }
     } catch {}
   }
-  if (out.results.length < limit && (provider === "youtube" || provider === "auto")) {
+  if (out.results.length < lim && (provider === "youtube" || provider === "auto")) {
     try {
       const yt = await youtubeSearch(query);
-      for (const v of yt.slice(0, limit - out.results.length)) {
+      for (const v of yt.slice(0, lim - out.results.length)) {
         out.results.push({ provider: "youtube", title: v.title, artist: v.channel, videoId: v.videoId });
       }
     } catch {}

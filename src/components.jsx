@@ -1214,6 +1214,39 @@ function YouTubeIFramePlayer({ video, onClose }) {
   const containerRef = useRef(null);
   const playerRef    = useRef(null);
   const [ready, setReady] = useState(false);
+  // Track which candidate we've tried so we can walk the list on embed error.
+  // candidates includes the initial videoId at index 0.
+  const candidatesRef = useRef([]);
+  const candidateIdxRef = useRef(0);
+  const [activeVideo, setActiveVideo] = useState(video);
+
+  // When the parent passes a new `video`, reset the candidate cursor.
+  useEffect(() => {
+    candidatesRef.current = Array.isArray(video?.candidates) && video.candidates.length
+      ? video.candidates
+      : (video?.videoId ? [{ videoId: video.videoId, title: video.title, channel: video.channel, thumbnail: video.thumbnail }] : []);
+    candidateIdxRef.current = 0;
+    setActiveVideo(video);
+  }, [video?.videoId]);
+
+  // YouTube IFrame error codes:
+  //   2   — invalid videoId (malformed)
+  //   5   — HTML5 player can't play this content
+  //   100 — video removed / private
+  //   101 — embedding disabled by owner (third-party domain)
+  //   150 — same as 101 (different surface)
+  // 101/150 are the common ones for big-label uploads. On any of these we
+  // advance to the next ranked candidate from the server.
+  const tryNextCandidate = () => {
+    const next = candidateIdxRef.current + 1;
+    const list = candidatesRef.current;
+    if (next >= list.length) return false;
+    candidateIdxRef.current = next;
+    const cand = list[next];
+    setActiveVideo({ ...cand, candidates: list });
+    try { playerRef.current?.loadVideoById?.(cand.videoId); } catch {}
+    return true;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1252,6 +1285,12 @@ function YouTubeIFramePlayer({ video, onClose }) {
         },
         events: {
           onReady: () => setReady(true),
+          onError: (e) => {
+            const code = e?.data;
+            if (code === 101 || code === 150 || code === 100 || code === 5) {
+              tryNextCandidate();
+            }
+          },
         },
       });
     });
@@ -1280,8 +1319,8 @@ function YouTubeIFramePlayer({ video, onClose }) {
       </div>
       <div className="yt-player__meta">
         <p className="yt-player__hint">YouTube source</p>
-        <p className="yt-player__title" title={video.title}>{video.title || "Untitled"}</p>
-        {video.channel && <p className="yt-player__channel" title={video.channel}>{video.channel}</p>}
+        <p className="yt-player__title" title={activeVideo?.title || video.title}>{activeVideo?.title || video.title || "Untitled"}</p>
+        {(activeVideo?.channel || video.channel) && <p className="yt-player__channel" title={activeVideo?.channel || video.channel}>{activeVideo?.channel || video.channel}</p>}
       </div>
       <button type="button" className="yt-player__close alive-button" onClick={onClose} title="Switch back to the album view">
         ×

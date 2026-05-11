@@ -54,9 +54,17 @@ function buildBlueSystemPrompt({ context = {}, memory = {}, allowTools = false, 
     lines.push(
       "",
       "You have tools available. Use them to TAKE ACTIONS, not to answer questions about taste/opinion.",
-      "Call play_track when the user wants something played. Call pause/next for transport. Call set_mood when the vibe shifts.",
-      "Don't call tools for casual conversation.",
-      "After tool execution, respond conversationally about what you did.",
+      "WHEN THE USER ASKS TO PLAY MUSIC, YOU MUST CALL play_track. Do not just describe what you would play — actually call the tool. Saying 'Sure, playing X' without invoking play_track is a failure.",
+      "This includes vague requests: 'play any Hindi song' → pick a specific song you'd recommend (e.g. 'Tum Hi Ho Arijit Singh'), call play_track with that as the query. 'play something chill' → pick a chill song and call play_track.",
+      "Call pause/next for transport. Call set_mood when the vibe shifts.",
+      "Don't call tools for casual conversation (greetings, opinions, taste discussions).",
+      "play_track rules — read carefully:",
+      "  • query MUST be the literal 'song title artist' as a string. Never 'this', 'that', or 'the current song'.",
+      "  • If the user says 'play this on YouTube' or 'switch this to Spotify', look at the 'Currently playing' line in your context and put THAT title + artist in the query field.",
+      "  • If the user is vague ('any X song', 'something Y'), pick a specific song that fits and pass its title+artist. Do NOT ask for clarification — just pick one and play it.",
+      "  • Only pass provider='spotify' / 'youtube' / 'apple' when the user explicitly names that provider. Otherwise pass 'auto'.",
+      "  • The ONLY case where you should NOT call play_track and instead ask is when the user uses a pronoun ('this'/'that') AND there's no Currently playing context to resolve it from.",
+      "After tool execution, respond conversationally about what you did (one short sentence).",
     );
   } else {
     lines.push(

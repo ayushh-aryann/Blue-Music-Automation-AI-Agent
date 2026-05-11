@@ -67,9 +67,37 @@ async function scrapeYouTubeSearch(query) {
   return out.slice(0, 12);
 }
 
+// Score a search hit by how likely the YouTube IFrame player can actually
+// embed it. Official label uploads (VEVO, "- Official", music-company channels)
+// frequently disable embedding on third-party sites, which leaves the player
+// stuck on a "Watch on YouTube" link. The auto-generated "- Topic" channels
+// from YouTube Music never restrict embedding, so we prefer those, followed
+// by lyric videos and audio/visualizer uploads.
+function rankYouTubeHit(hit) {
+  const channel = (hit.channel || "").toLowerCase();
+  const title   = (hit.title   || "").toLowerCase();
+  let score = 0;
+  if (/ - topic$|– topic$/i.test(channel)) score += 100; // gold standard
+  if (/\blyrics?\b|\blyric video\b/.test(title)) score += 40;
+  if (/\baudio\b|\bvisualizer\b|\bofficial audio\b/.test(title)) score += 25;
+  if (/\bvevo\b/.test(channel)) score -= 50;        // notorious for blocking embeds
+  if (/\bofficial music video\b/.test(title)) score -= 25;
+  if (/\bmusic\b/.test(channel)) score += 5;        // labels often have "Music" suffix but mixed
+  if (/\blive\b|\bconcert\b|\bperformance\b/.test(title)) score -= 10;
+  if (/\bcover\b|\bremix\b/.test(title)) score -= 5;
+  return score;
+}
+
+function rankYouTubeHits(hits) {
+  return hits
+    .map((h) => ({ ...h, _score: rankYouTubeHit(h) }))
+    .sort((a, b) => b._score - a._score);
+}
+
 async function resolveYouTubeVideo(query) {
   const results = await youtubeSearch(query);
-  const first = results[0];
+  const ranked = rankYouTubeHits(results);
+  const first = ranked[0];
   if (!first) return { videoId: "", title: "", channel: "", thumbnail: "" };
   return first;
 }
@@ -77,30 +105,45 @@ async function resolveYouTubeVideo(query) {
 // YouTube provider play. We never start playback server-side — instead we
 // resolve a videoId for the query and return it. The frontend's IFrame Player
 // loads that videoId. Fully legal and works without an API key.
+//
+// We return up to 5 candidates so the frontend can fall back to the next one
+// if the embed is blocked (IFrame error 101/150 "playback disabled by owner").
 async function youtubeProviderPlay({ query, title, artist }) {
   const q = query || [title, artist].filter(Boolean).join(" ");
   if (!q) return { ok: false, error: "No query." };
-  const result = await resolveYouTubeVideo(q).catch((e) => ({ error: e.message }));
-  if (!result || !result.videoId) {
-    return { ok: false, error: result?.error || "No YouTube video found." };
+  let results;
+  try {
+    results = await youtubeSearch(q);
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
+  const ranked = rankYouTubeHits(results).slice(0, 5);
+  if (!ranked.length) return { ok: false, error: "No YouTube video found." };
+  const pick = ranked[0];
+  const candidates = ranked.map((r) => ({
+    videoId:   r.videoId,
+    title:     r.title,
+    channel:   r.channel,
+    thumbnail: r.thumbnail,
+  }));
   return {
     ok: true,
     youtube: {
-      videoId:    result.videoId,
-      title:      result.title || title,
-      channel:    result.channel || artist,
-      thumbnail:  result.thumbnail || "",
-      embedUrl:   `https://www.youtube.com/embed/${result.videoId}?autoplay=1&playsinline=1&modestbranding=1&enablejsapi=1`,
-      watchUrl:   `https://www.youtube.com/watch?v=${result.videoId}`,
+      videoId:    pick.videoId,
+      title:      pick.title || title,
+      channel:    pick.channel || artist,
+      thumbnail:  pick.thumbnail || "",
+      embedUrl:   `https://www.youtube.com/embed/${pick.videoId}?autoplay=1&playsinline=1&modestbranding=1&enablejsapi=1`,
+      watchUrl:   `https://www.youtube.com/watch?v=${pick.videoId}`,
+      candidates,
     },
     track: {
-      title:  result.title  || title  || q,
-      artist: result.channel || artist || "",
+      title:  pick.title  || title  || q,
+      artist: pick.channel || artist || "",
       genre:  "Unknown",
-      mood:   inferMood(`${result.title || ""} ${result.channel || ""}`) || "Chill",
+      mood:   inferMood(`${pick.title || ""} ${pick.channel || ""}`) || "Chill",
       query:  q,
-      albumArt: result.thumbnail || "",
+      albumArt: pick.thumbnail || "",
       provider: "youtube",
     },
   };
@@ -111,4 +154,5 @@ module.exports = {
   scrapeYouTubeSearch,
   resolveYouTubeVideo,
   youtubeProviderPlay,
+  rankYouTubeHits,
 };

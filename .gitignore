@@ -4,3 +4,6 @@
 .chrome-profile-blue/
 .edge-profile-blue/
 node_modules/
+.venv-audio/
+.venv/
+venv/
