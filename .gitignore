@@ -1,6 +1,8 @@
 .env
 .blue-state.json
 .blue-server.*.log
+.blue-events.jsonl
+.blue-vector-memory.jsonl
 .chrome-profile-blue/
 .edge-profile-blue/
 node_modules/
