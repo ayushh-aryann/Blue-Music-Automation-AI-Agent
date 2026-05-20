@@ -310,64 +310,169 @@ function ParticleWaveCanvas({ style = {} }) {
   return <canvas ref={canvasRef} className="neural-canvas" style={style} aria-hidden="true" />;
 }
 
-function DonutChart({ title, data }) {
-  const colors = window.BLUE_CHART_COLORS;
+/* ── Donut Chart ──────────────────────────────────────────────────────────
+   Interactive donut for the dashboard's mood/genre splits. Each arc draws
+   in via stroke-dashoffset on mount and on data change. Hover an arc OR
+   the matching legend row to highlight both; the center label morphs to
+   show that segment's name + share. Mood charts accept `onSelect` so a
+   click filters the chat panel's active mood. The ambient gradient behind
+   the SVG picks up the dominant segment's color.
+   ───────────────────────────────────────────────────────────────────── */
+function DonutChart({ title, data, kind = "generic", activeName, onSelect }) {
+  const moodColors  = window.BLUE_MOOD_COLORS  || {};
+  const genreColors = window.BLUE_GENRE_COLORS || {};
+  const palette     = window.BLUE_CHART_COLORS;
+  const colorFor = (name, i) => {
+    if (kind === "mood"  && moodColors[name])  return moodColors[name];
+    if (kind === "genre" && genreColors[name]) return genreColors[name];
+    return palette[i % palette.length];
+  };
+
   const entries = Object.entries(data)
     .filter(([, value]) => value > 0)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
+    .slice(0, 6);
   const total = entries.reduce((sum, [, value]) => sum + value, 0);
-  let start = 0;
+  const dataKey = entries.map(([n, v]) => `${n}:${v}`).join("|");
 
-  const polar = (cx, cy, radius, angle) => {
-    const radians = ((angle - 90) * Math.PI) / 180;
-    return { x: cx + radius * Math.cos(radians), y: cy + radius * Math.sin(radians) };
+  // Re-trigger the draw-in animation on every data change. We bump a counter
+  // so React's key changes on the arc paths, remounting them with
+  // strokeDashoffset=100, and then a microtask flip starts the tween.
+  const [drawNonce, setDrawNonce] = React.useState(0);
+  const [drawn, setDrawn] = React.useState(false);
+  React.useEffect(() => {
+    setDrawn(false);
+    setDrawNonce((n) => n + 1);
+    const t = setTimeout(() => setDrawn(true), 30);
+    return () => clearTimeout(t);
+  }, [dataKey]);
+
+  const [hovered, setHovered] = React.useState(null); // segment name or null
+
+  const polar = (cx, cy, r, angle) => {
+    const rad = ((angle - 90) * Math.PI) / 180;
+    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+  };
+  const arc = (x, y, r, a0, a1) => {
+    const p0 = polar(x, y, r, a1);
+    const p1 = polar(x, y, r, a0);
+    const large = a1 - a0 <= 180 ? 0 : 1;
+    return `M ${p0.x} ${p0.y} A ${r} ${r} 0 ${large} 0 ${p1.x} ${p1.y}`;
   };
 
-  const arc = (x, y, radius, startAngle, endAngle) => {
-    const startPoint = polar(x, y, radius, endAngle);
-    const endPoint = polar(x, y, radius, startAngle);
-    const large = endAngle - startAngle <= 180 ? 0 : 1;
-    return `M ${startPoint.x} ${startPoint.y} A ${radius} ${radius} 0 ${large} 0 ${endPoint.x} ${endPoint.y}`;
-  };
+  // Build segments with arc paths and per-segment colors
+  let cursor = 0;
+  const segments = entries.map(([name, value], index) => {
+    const angle = (value / total) * 360;
+    const path  = arc(50, 50, 35, cursor, cursor + angle);
+    const seg   = { name, value, path, color: colorFor(name, index), pct: (value / total) * 100 };
+    cursor += angle;
+    return seg;
+  });
+
+  const dominant = segments[0];
+  const activeSeg = hovered != null ? segments.find((s) => s.name === hovered) : null;
+  const isInteractive = typeof onSelect === "function";
 
   if (!total) {
     return (
-      <div className="liquid-glass dashboard-card rounded-[1.25rem] p-5 text-white">
-        <p className="font-body text-sm text-white/70">{title}</p>
-        <p className="mt-4 font-heading text-3xl font-bold leading-none">Collecting</p>
-        <p className="mt-2 max-w-[28ch] font-body text-sm font-light text-white/80">Play music through Blue or connect Spotify, and this chart becomes real.</p>
+      <div className="liquid-glass dashboard-card donut-chart donut-chart--empty rounded-[1.25rem] p-5 text-white">
+        <div className="donut-chart__ambient" aria-hidden="true" />
+        <div className="relative z-10">
+          <p className="font-body text-sm text-white/70">{title}</p>
+          <p className="mt-4 font-heading text-3xl font-bold leading-none">Collecting</p>
+          <p className="mt-2 max-w-[28ch] font-body text-sm font-light text-white/80">Play music through Blue or connect Spotify, and this chart becomes real.</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="liquid-glass dashboard-card rounded-[1.25rem] p-5 text-white">
-      <p className="font-body text-sm text-white/70">{title}</p>
-      <div className="mt-4 grid grid-cols-[120px_1fr] items-center gap-4 max-sm:grid-cols-1">
-        <svg viewBox="0 0 100 100" className="h-[120px] w-[120px]" role="img" aria-label={`${title} chart`}>
-          <circle cx="50" cy="50" r="35" fill="none" stroke="rgba(255,255,255,0.16)" strokeWidth="13" />
-          {entries.map(([name, value], index) => {
-            const angle = (value / total) * 360;
-            const path = arc(50, 50, 35, start, start + angle);
-            start += angle;
-            return <path key={name} className="donut-path" d={path} fill="none" stroke={colors[index % colors.length]} strokeWidth="13" strokeLinecap="round" />;
+    <div
+      className={`liquid-glass dashboard-card donut-chart rounded-[1.25rem] p-5 text-white ${isInteractive ? "donut-chart--interactive" : ""}`}
+      style={{ "--donut-color": (activeSeg || dominant).color }}
+    >
+      <div className="donut-chart__ambient" aria-hidden="true" />
+
+      <div className="relative z-10 flex items-baseline justify-between gap-3">
+        <p className="font-body text-sm text-white/70">{title}</p>
+        <span className="font-body text-[11px] uppercase tracking-[0.15em] text-white/45">{total} plays</span>
+      </div>
+
+      <div className="relative z-10 mt-4 grid grid-cols-[140px_1fr] items-center gap-5 max-sm:grid-cols-1 max-sm:justify-items-center">
+        <svg
+          viewBox="0 0 100 100"
+          className="donut-chart__svg h-[140px] w-[140px]"
+          role="img"
+          aria-label={`${title} chart`}
+          onMouseLeave={() => setHovered(null)}
+        >
+          <circle cx="50" cy="50" r="35" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="13" />
+          {segments.map((seg) => {
+            const dim     = activeSeg && activeSeg.name !== seg.name;
+            const active  = activeSeg && activeSeg.name === seg.name;
+            const filter  = activeName === seg.name;
+            return (
+              <path
+                key={`${drawNonce}|${seg.name}`}
+                d={seg.path}
+                pathLength="100"
+                stroke={seg.color}
+                strokeWidth={active ? 17 : 13}
+                strokeLinecap="round"
+                fill="none"
+                className={`donut-chart__arc ${dim ? "donut-chart__arc--dim" : ""} ${active ? "donut-chart__arc--active" : ""} ${filter ? "donut-chart__arc--filter" : ""}`}
+                style={{
+                  strokeDashoffset: drawn ? 0 : 100,
+                  color: seg.color, // for color-mix in CSS
+                }}
+                onMouseEnter={() => setHovered(seg.name)}
+                onClick={() => isInteractive && onSelect(seg.name)}
+              />
+            );
           })}
-          <text x="50" y="48" textAnchor="middle" fill="#fff" fontSize="9" fontFamily="Space Grotesk, system-ui" fontWeight="600">
-            {total}
-          </text>
-          <text x="50" y="60" textAnchor="middle" fill="rgba(255,255,255,0.72)" fontSize="7" fontFamily="Space Grotesk, system-ui">
-            plays
-          </text>
+          {/* Center: morphs between aggregate total and hovered segment */}
+          <g className="donut-chart__center" style={{ pointerEvents: "none" }}>
+            <text x="50" y={activeSeg ? 44 : 49} textAnchor="middle" className="donut-chart__num" fill="#fff">
+              {activeSeg ? `${Math.round(activeSeg.pct)}%` : total}
+            </text>
+            <text x="50" y={activeSeg ? 54 : 60} textAnchor="middle" className="donut-chart__num-label" fill="rgba(255,255,255,0.6)">
+              {activeSeg ? "share" : "plays"}
+            </text>
+            {activeSeg && (
+              <text x="50" y={66} textAnchor="middle" className="donut-chart__num-name" fill={activeSeg.color}>
+                {activeSeg.name.length > 12 ? activeSeg.name.slice(0, 11) + "…" : activeSeg.name}
+              </text>
+            )}
+          </g>
         </svg>
-        <div className="grid gap-2">
-          {entries.map(([name, value], index) => (
-            <div className="flex items-center gap-2 font-body text-sm text-white/85" key={name}>
-              <span className="h-2.5 w-2.5 rounded-full" style={{ background: colors[index % colors.length] }} />
-              <span className="truncate">{name}</span>
-              <span className="ml-auto text-white/60">{Math.round((value / total) * 100)}%</span>
-            </div>
-          ))}
+
+        <div className="grid w-full gap-1">
+          {segments.map((seg) => {
+            const active = activeSeg?.name === seg.name;
+            const filter = activeName === seg.name;
+            const Row = isInteractive ? "button" : "div";
+            const rowProps = isInteractive
+              ? { type: "button", onClick: () => onSelect(seg.name) }
+              : {};
+            return (
+              <Row
+                {...rowProps}
+                key={seg.name}
+                className={`donut-chart__row ${active ? "is-hover" : ""} ${filter ? "is-filter" : ""} ${isInteractive ? "is-clickable" : ""}`}
+                onMouseEnter={() => setHovered(seg.name)}
+                onMouseLeave={() => setHovered(null)}
+                style={{ "--row-color": seg.color }}
+                title={isInteractive ? `Filter chat to ${seg.name}` : undefined}
+              >
+                <span className="donut-chart__dot" style={{ background: seg.color }} />
+                <span className="truncate font-body text-sm text-white/85">{seg.name}</span>
+                <span className="ml-auto font-body text-xs tabular-nums text-white/55">
+                  {Math.round(seg.pct)}%
+                </span>
+              </Row>
+            );
+          })}
         </div>
       </div>
     </div>

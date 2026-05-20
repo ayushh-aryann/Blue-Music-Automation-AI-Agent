@@ -394,10 +394,45 @@ function App() {
     };
   },[events]);
 
+  // Tracks we've already sent to /api/music/identify — prevents duplicate
+  // requests (YouTube tracks land here with genre:"Unknown" and we want to
+  // backfill once, not every time the same track replays).
+  const enrichedRef = React.useRef(new Set());
+  const enrichGenre = React.useCallback(async (track) => {
+    if (!track?.title || track.genre !== "Unknown") return;
+    const key = `${track.title}|${track.artist || ""}`.toLowerCase();
+    if (enrichedRef.current.has(key)) return;
+    enrichedRef.current.add(key);
+    try {
+      const params = new URLSearchParams({ title: track.title, artist: track.artist || "" });
+      const r = await fetch(`/api/music/identify?${params}`).then((res)=>res.ok?res.json():null);
+      const primary = r?.primary;
+      if (!primary || primary === "Unknown") return;
+      // The original mood was inferred without a genre signal so it almost
+      // always landed in "Chill". Revise mood only when it was that default —
+      // preserves any explicitly-set mood.
+      const newMood = window.BLUE_GENRE_MOOD?.[primary];
+      setEvents((old) => old.map((e) => {
+        if ((e.title || "").toLowerCase() !== track.title.toLowerCase()) return e;
+        if ((e.artist || "").toLowerCase() !== (track.artist || "").toLowerCase()) return e;
+        const next = { ...e, genre: primary };
+        if (newMood && e.mood === "Chill") next.mood = newMood;
+        return next;
+      }));
+      setCurrentTrack((cur) => {
+        if (!cur || cur.title !== track.title || cur.artist !== track.artist) return cur;
+        const next = { ...cur, genre: primary };
+        if (newMood && cur.mood === "Chill") next.mood = newMood;
+        return next;
+      });
+    } catch {}
+  }, []);
+
   const recordPlay = (track,source="Blue")=>{
     const n = normalizeTrack(track,source);
     setCurrentTrack(n);
     setEvents(old=>mergeEvents(old,[n]));
+    enrichGenre(n);
   };
 
   const previewAudioRef = React.useRef(null);
@@ -1146,8 +1181,8 @@ function DashboardPanel({ stats, events, messages, input, setInput, mood, setMoo
           />
         </div>
 
-        <div data-reveal><DonutChart title="Mood listening split" data={stats.moodData} /></div>
-        <div data-reveal><DonutChart title="Genre listening split" data={stats.genreData} /></div>
+        <div data-reveal><DonutChart title="Mood listening split"  data={stats.moodData}  kind="mood"  activeName={mood} onSelect={setMood} /></div>
+        <div data-reveal><DonutChart title="Genre listening split" data={stats.genreData} kind="genre" /></div>
 
         <div data-reveal className="liquid-glass dashboard-card rounded-[1.25rem] p-5">
           <p className="font-body text-sm text-white/70">Top signals</p>

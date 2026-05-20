@@ -1613,6 +1613,142 @@ html.smooth-scroll { scroll-behavior: smooth; }
   contain: layout;
 }
 
+/* ── Donut chart (dashboard mood / genre splits) ─────────────────────────
+   Per-segment colors, animated arc draw-in via stroke-dashoffset, hover
+   syncing between arcs and legend rows, ambient color glow keyed off the
+   active (or dominant) segment. Mood chart is interactive — clicking a
+   segment sets the chat panel's active mood. */
+.donut-chart {
+  position: relative;
+  isolation: isolate;
+  --donut-color: #7db7ff;
+}
+
+.donut-chart__ambient {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(140% 90% at 18% 0%, color-mix(in srgb, var(--donut-color) 22%, transparent), transparent 60%),
+    radial-gradient(140% 90% at 82% 100%, color-mix(in srgb, var(--donut-color) 12%, transparent), transparent 65%);
+  transition: background 500ms ease;
+}
+
+.donut-chart__svg {
+  overflow: visible;
+}
+
+.donut-chart__arc {
+  stroke-dasharray: 100 100;
+  transition:
+    stroke-dashoffset 900ms cubic-bezier(0.22, 1, 0.36, 1),
+    stroke-width 260ms ease,
+    opacity 220ms ease;
+  cursor: default;
+}
+
+.donut-chart--interactive .donut-chart__arc { cursor: pointer; }
+
+.donut-chart__arc--active {
+  filter: drop-shadow(0 0 8px color-mix(in srgb, currentColor 70%, transparent));
+}
+
+.donut-chart__arc--dim { opacity: 0.32; }
+
+.donut-chart__arc--filter:not(.donut-chart__arc--active) {
+  filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 50%, transparent));
+}
+
+.donut-chart__num {
+  font-family: "Space Grotesk", system-ui;
+  font-size: 13px;
+  font-weight: 700;
+  transition: font-size 220ms ease;
+}
+
+.donut-chart__num-label {
+  font-family: "Space Grotesk", system-ui;
+  font-size: 6.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.donut-chart__num-name {
+  font-family: "Space Grotesk", system-ui;
+  font-size: 6.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  animation: donutNameIn 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes donutNameIn {
+  0%   { opacity: 0; transform: translateY(2px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.donut-chart__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 9px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  --row-color: rgba(255,255,255,0.6);
+  transition:
+    background 200ms ease,
+    border-color 200ms ease,
+    transform 200ms ease;
+}
+
+.donut-chart__row.is-clickable { cursor: pointer; }
+.donut-chart__row.is-clickable:hover { transform: translateX(2px); }
+
+.donut-chart__row:hover,
+.donut-chart__row.is-hover {
+  background: color-mix(in srgb, var(--row-color) 9%, rgba(255,255,255,0.03));
+  border-color: color-mix(in srgb, var(--row-color) 22%, transparent);
+}
+
+.donut-chart__row.is-filter {
+  background: color-mix(in srgb, var(--row-color) 14%, rgba(255,255,255,0.03));
+  border-color: color-mix(in srgb, var(--row-color) 40%, transparent);
+  box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--row-color) 60%, transparent);
+}
+
+.donut-chart__dot {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
+  transition: transform 220ms ease, box-shadow 220ms ease;
+}
+
+.donut-chart__row.is-hover .donut-chart__dot,
+.donut-chart__row:hover .donut-chart__dot {
+  transform: scale(1.4);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--row-color) 35%, transparent);
+}
+
+.donut-chart__row.is-filter .donut-chart__dot {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--row-color) 55%, transparent);
+}
+
+.donut-chart--empty .donut-chart__ambient {
+  opacity: 0.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .donut-chart__arc { transition: none; }
+  .donut-chart__num-name { animation: none; }
+}
+
 /* ── Live Dashboard capability card ──────────────────────────────────────
    Bubble field + pulsing now-playing dot + morphing up-next block. The
    bubbles use CSS-only animation (no JS rAF) so the cost is GPU compositing,

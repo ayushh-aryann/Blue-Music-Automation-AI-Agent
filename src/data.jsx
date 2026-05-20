@@ -26,3 +26,66 @@ window.BLUE_FALLBACK_CATALOG = [
 window.BLUE_MOODS = ["Electric", "Chill", "Focused", "Late Night", "Reflective", "Calm"];
 
 window.BLUE_CHART_COLORS = ["#ffffff", "#7db7ff", "#d0d7e2", "#ffdf99", "#ff9f92", "#8ea0bd"];
+
+// Per-name palettes so the donut chart can give each mood/genre a meaningful
+// hue instead of cycling generic colors. Mood colors are tuned to the feeling
+// ("Electric" warm/punchy, "Calm" cool green, etc). Genre colors are picked
+// to be distinguishable in a single legend.
+window.BLUE_MOOD_COLORS = {
+  "Electric":   "#FF7847",
+  "Chill":      "#7DB7FF",
+  "Focused":    "#B991FF",
+  "Late Night": "#5563E8",
+  "Reflective": "#FFC971",
+  "Calm":       "#7BD9A7",
+  "Unknown":    "#8E9AAF",
+};
+
+window.BLUE_GENRE_COLORS = {
+  "Hip-Hop":    "#6BCB77",
+  "Bollywood":  "#FFA45B",
+  "Sufi":       "#DDA15E",
+  "K-Pop":      "#FF6FB5",
+  "J-Pop":      "#FF80BF",
+  "Latin":      "#F77F00",
+  "Reggae":     "#6A994E",
+  "Metal":      "#B83A4B",
+  "Punk":       "#E63946",
+  "R&B":        "#FF9F92",
+  "Electronic": "#4D96FF",
+  "Jazz":       "#8A6FBF",
+  "Classical":  "#A8DADC",
+  "Country":    "#C9A66B",
+  "Folk":       "#B9956B",
+  "Indie":      "#C589E8",
+  "Pop":        "#FFD93D",
+  "Rock":       "#FF6B6B",
+  "Other":      "#8E9AAF",
+  "Unknown":    "#5b6478",
+};
+
+// When the iTunes/MusicBrainz lookup fills in a previously-Unknown genre, we
+// can also revise the mood — the original was inferred from the title with no
+// genre signal and defaulted to "Chill" for almost everything. This map only
+// fires when the existing mood is "Chill" (the bias-default), preserving any
+// mood the user or LLM set deliberately.
+window.BLUE_GENRE_MOOD = {
+  "Hip-Hop":    "Electric",
+  "Rock":       "Electric",
+  "Metal":      "Electric",
+  "Punk":       "Electric",
+  "Electronic": "Focused",
+  "K-Pop":      "Electric",
+  "J-Pop":      "Electric",
+  "Latin":      "Electric",
+  "Indie":      "Chill",
+  "Pop":        "Chill",
+  "R&B":        "Late Night",
+  "Jazz":       "Chill",
+  "Classical":  "Calm",
+  "Sufi":       "Calm",
+  "Bollywood":  "Reflective",
+  "Folk":       "Reflective",
+  "Country":    "Chill",
+  "Reggae":     "Chill",
+};
