@@ -45,6 +45,7 @@ const {
   postMemorySearch,
 } = require("./routes/events");
 const { audioHealth, audioAnalyze } = require("./routes/audio");
+const { voiceInput, voiceStatus }   = require("./routes/voice");
 
 const { warmOllama } = require("./agent/ollama");
 
@@ -102,6 +103,10 @@ const server = http.createServer(async (req, res) => {
     // ── Audio analysis sidecar (Phase 2) ─────────────────────────────────
     if (url.pathname === "/api/audio/health"  && req.method === "GET")  return audioHealth(req, res);
     if (url.pathname === "/api/audio/analyze" && req.method === "POST") return audioAnalyze(req, res);
+
+    // ── Voice daemon bridge (Phase 3) ─────────────────────────────────────
+    if (url.pathname === "/api/voice/input"  && req.method === "POST") return voiceInput(req, res);
+    if (url.pathname === "/api/voice/status" && req.method === "GET")  return voiceStatus(req, res);
 
     return serveStatic(url.pathname, res);
   } catch (error) {

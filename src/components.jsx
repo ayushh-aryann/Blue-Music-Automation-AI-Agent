@@ -333,7 +333,7 @@ function DonutChart({ title, data }) {
 
   if (!total) {
     return (
-      <div className="liquid-glass tilt-card dashboard-card rounded-[1.25rem] p-5 text-white" data-tilt="card">
+      <div className="liquid-glass dashboard-card rounded-[1.25rem] p-5 text-white">
         <p className="font-body text-sm text-white/70">{title}</p>
         <p className="mt-4 font-heading text-3xl font-bold leading-none">Collecting</p>
         <p className="mt-2 max-w-[28ch] font-body text-sm font-light text-white/80">Play music through Blue or connect Spotify, and this chart becomes real.</p>
@@ -342,7 +342,7 @@ function DonutChart({ title, data }) {
   }
 
   return (
-    <div className="liquid-glass tilt-card dashboard-card rounded-[1.25rem] p-5 text-white" data-tilt="card">
+    <div className="liquid-glass dashboard-card rounded-[1.25rem] p-5 text-white">
       <p className="font-body text-sm text-white/70">{title}</p>
       <div className="mt-4 grid grid-cols-[120px_1fr] items-center gap-4 max-sm:grid-cols-1">
         <svg viewBox="0 0 100 100" className="h-[120px] w-[120px]" role="img" aria-label={`${title} chart`}>
@@ -1346,8 +1346,7 @@ function LiveMusicPlayer({ track, lyrics, playback, isPlaying, onPlay, onPause, 
   return (
     <div
       data-reveal
-      className={`live-player tilt-card ${hasTrack ? "is-active" : "is-idle"} ${isPlaying ? "is-playing" : ""} ${isYouTube ? "is-youtube" : ""}`}
-      data-tilt="card"
+      className={`live-player ${hasTrack ? "is-active" : "is-idle"} ${isPlaying ? "is-playing" : ""} ${isYouTube ? "is-youtube" : ""}`}
     >
       {/* Blurred backdrop — uses YouTube thumb when YT is active, otherwise
           the album art. Falls back to the gradient idle backdrop. */}

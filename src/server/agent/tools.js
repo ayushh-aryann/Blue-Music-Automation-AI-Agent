@@ -16,6 +16,7 @@ const { planSession } = require("./planner");
 const { gatherContext } = require("./context");
 const { analyze: analyzeAudio } = require("../providers/audio-analysis");
 const { resolveYouTubeVideo } = require("../providers/youtube");
+const { getProfileSummary } = require("./profile");
 
 async function runProviderPlay(name, args) {
   if (name === "spotify") return spotifyProviderPlay(args);
@@ -189,6 +190,14 @@ const toolSchemas = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_listening_profile",
+      description: "Return the user's adaptive listening profile: top artists/genres, time-of-day patterns, and artists they frequently skip. Call BEFORE making unsolicited recommendations or when the user asks what they listen to.",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
 ];
 
 // ── Handlers ────────────────────────────────────────────────────────────
@@ -259,12 +268,26 @@ async function play_track({ query, uri, provider = "auto" }) {
 
   if (ok && lastResult.track) {
     await logEvent("play", {
-      title: lastResult.track.title,
-      artist: lastResult.track.artist,
+      title:    lastResult.track.title,
+      artist:   lastResult.track.artist,
+      genre:    lastResult.track.genre || "",
       query,
       provider: finalProvider,
-      uri: lastResult.uri || uri,
+      uri:      lastResult.uri || uri,
     });
+
+    // Announce "now playing" via voice daemon if it's running
+    const VOICE_PORT = Number(process.env.BLUE_VOICE_PORT || 4177);
+    if (VOICE_PORT) {
+      const trackLabel = lastResult.track.title
+        + (lastResult.track.artist ? ` by ${lastResult.track.artist}` : "");
+      fetch(`http://127.0.0.1:${VOICE_PORT}/speak`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: `Now playing ${trackLabel}` }),
+        signal: AbortSignal.timeout(2000),
+      }).catch(() => {});
+    }
   }
 
   return {
@@ -384,6 +407,11 @@ async function analyze_track({ query, url }) {
   return analyzeAudio({ url: resolvedUrl, cache_key });
 }
 
+async function get_listening_profile() {
+  const summary = getProfileSummary();
+  return { ok: true, ...summary };
+}
+
 async function find_lyric_line({ query, k = 5 }) {
   const hits = await recall(query, { k: Math.min(10, k), types: ["lyric"] });
   return {
@@ -411,6 +439,7 @@ const handlers = {
   find_lyric_line,
   get_context,
   analyze_track,
+  get_listening_profile,
 };
 
 async function dispatch(name, args) {

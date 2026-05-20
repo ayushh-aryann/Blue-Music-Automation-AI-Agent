@@ -258,9 +258,11 @@ a {
   min-height: 250px;
 }
 
+/* Donut SVGs no longer animate in 3D — the parent card is flat now, and the
+   old chartHover keyframe (translateZ + rotateX/Y) read as glitchy without a
+   live perspective context. */
 .dashboard-card svg {
-  transform: translateZ(30px);
-  animation: chartHover 5.5s ease-in-out infinite;
+  transform: none;
 }
 
 .dashboard-card .legend-list,
@@ -473,11 +475,6 @@ a {
 @keyframes cardDrift {
   0%, 100% { translate: 0 0;   }
   50%       { translate: 0 -5px; }
-}
-
-@keyframes chartHover {
-  0%, 100% { transform: translateZ(30px) rotateX(0deg)  rotateY(0deg);  }
-  50%       { transform: translateZ(42px) rotateX(4deg)  rotateY(-5deg); }
 }
 
 @keyframes audioRise {
@@ -1608,10 +1605,133 @@ html.smooth-scroll { scroll-behavior: smooth; }
   contain: paint;
 }
 
-/* Use CSS containment on heavy panels so paint is bounded to the panel
-   when their content (lyrics, charts, particles) updates. */
+/* Use CSS containment on heavy panels for layout-isolation perf. We
+   intentionally do NOT include `paint` here — paint-containment clips the
+   panel's box-shadow and any tilted corners to the original rectangle,
+   producing a visible "invisible boundary" sliced edge on hover. */
 .live-player, .agent-shell, .capability-card, .dashboard-card {
-  contain: layout paint;
+  contain: layout;
+}
+
+/* ── Live Dashboard capability card ──────────────────────────────────────
+   Bubble field + pulsing now-playing dot + morphing up-next block. The
+   bubbles use CSS-only animation (no JS rAF) so the cost is GPU compositing,
+   not main-thread work. */
+.live-dashboard-card {
+  isolation: isolate;
+  background:
+    radial-gradient(120% 80% at 18% 0%,   rgba(125, 183, 255, 0.12), transparent 60%),
+    radial-gradient(120% 80% at 82% 100%, rgba(255, 159, 146, 0.09), transparent 60%),
+    rgba(8, 10, 18, 0.55);
+}
+
+.live-dashboard-card__bubbles {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+.live-dashboard-card__bubble {
+  position: absolute;
+  bottom: -16%;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.55), rgba(125, 183, 255, 0.28) 60%, transparent 80%);
+  filter: blur(0.5px);
+  opacity: 0;
+  animation-name: bubbleRise;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+  will-change: transform, opacity;
+}
+
+@keyframes bubbleRise {
+  0%   { transform: translate3d(0, 0, 0)        scale(0.55); opacity: 0; }
+  12%  { opacity: 0.85; }
+  55%  { opacity: 0.55; }
+  100% { transform: translate3d(8px, -380px, 0) scale(1.15); opacity: 0; }
+}
+
+.live-dashboard-card__pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #7db7ff;
+  box-shadow: 0 0 0 0 rgba(125, 183, 255, 0.6);
+  animation: pulseDot 1.8s ease-out infinite;
+}
+
+@keyframes pulseDot {
+  0%   { box-shadow: 0 0 0 0   rgba(125, 183, 255, 0.55); }
+  70%  { box-shadow: 0 0 0 9px rgba(125, 183, 255, 0); }
+  100% { box-shadow: 0 0 0 0   rgba(125, 183, 255, 0); }
+}
+
+.live-dashboard-card__divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+}
+
+.live-dashboard-card__arrow {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 228, 77, 0.18);
+  color: #FFE44D;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Re-mounted on every recommendation change via React key, so the keyframe
+   replays — clean fade-in-from-blur instead of a hard text swap. */
+.live-dashboard-card__next {
+  animation: nextFadeIn 600ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes nextFadeIn {
+  0%   { opacity: 0; transform: translateY(8px); filter: blur(4px); }
+  100% { opacity: 1; transform: translateY(0);   filter: blur(0); }
+}
+
+.live-dashboard-card__play {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition:
+    transform 220ms ease,
+    background 220ms ease,
+    border-color 220ms ease,
+    box-shadow 220ms ease;
+}
+
+.live-dashboard-card__play:hover:not(:disabled) {
+  background: rgba(255, 228, 77, 0.18);
+  border-color: rgba(255, 228, 77, 0.32);
+  transform: translateY(-1px);
+  box-shadow: 0 12px 28px rgba(255, 228, 77, 0.14);
+}
+
+.live-dashboard-card__play:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.live-dashboard-card__play:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dashboard-card__bubble,
+  .live-dashboard-card__pulse,
+  .live-dashboard-card__next { animation: none; }
 }
 
 /* Smoother typography rendering on macOS / Windows ClearType displays */

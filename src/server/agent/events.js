@@ -34,9 +34,13 @@ function append(record) {
 // Log an event. Some types also write to the vector memory so the agent can
 // recall them via natural-language queries.
 async function logEvent(type, data = {}) {
+  // Stamp the hour of day so profile.js can build time-of-day patterns without
+  // recomputing it from `at` on every read (cheaper and survives DST changes).
+  const hour = data.hour ?? new Date().getHours();
   const record = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     at: Date.now(),
+    hour,
     type: String(type),
     ...data,
   };

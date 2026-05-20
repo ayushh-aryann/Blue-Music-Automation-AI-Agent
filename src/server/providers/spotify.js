@@ -155,6 +155,50 @@ function friendlySpotifyError(msg = "") {
   return msg || "Could not reach Spotify.";
 }
 
+// Parse a free-form "title by artist" / "artist - title" query into structured
+// fields so Spotify search can use field filters. Field-filtered searches are
+// dramatically more accurate than bare strings (which routinely return karaoke
+// / tribute / cover versions ranked above the original).
+function parseTrackQuery(raw) {
+  const q = String(raw || "").trim().replace(/\s+/g, " ");
+  if (!q) return { title: "", artist: "", raw: "" };
+  // "<title> by <artist>"
+  const byMatch = q.match(/^(.+?)\s+by\s+(.+)$/i);
+  if (byMatch) return { title: byMatch[1].trim(), artist: byMatch[2].trim(), raw: q };
+  // "<artist> - <title>"  or  "<title> - <artist>" — ambiguous, prefer artist-first
+  // (matches how YouTube tends to title music videos)
+  const dashMatch = q.match(/^(.+?)\s*[-–—]\s*(.+)$/);
+  if (dashMatch) return { title: dashMatch[2].trim(), artist: dashMatch[1].trim(), raw: q };
+  return { title: q, artist: "", raw: q };
+}
+
+// Filter out the karaoke / tribute / "made famous by" mess that bare Spotify
+// searches surface. These markers are reliable: legit official releases never
+// stamp themselves with these tokens.
+const KARAOKE_TITLE = /\b(karaoke|tribute|made famous by|in the style of|instrumental version|backing track|sing[\s-]?along|cover version)\b/i;
+const KARAOKE_ARTIST = /\b(karaoke|tribute|cover band|originally performed by|made famous by)\b/i;
+
+function rankSpotifyHit(item, wantTitle, wantArtist) {
+  const title  = (item?.name || "").toLowerCase();
+  const artists = (item?.artists || []).map((a) => (a?.name || "").toLowerCase());
+  let score = item?.popularity ?? 0;     // 0..100 base
+  if (KARAOKE_TITLE.test(title))  score -= 1000;
+  if (artists.some((a) => KARAOKE_ARTIST.test(a))) score -= 1000;
+  if (wantArtist) {
+    const wa = wantArtist.toLowerCase().trim();
+    if (artists.some((a) => a === wa)) score += 200;            // exact match
+    else if (artists.some((a) => a.includes(wa) || wa.includes(a))) score += 100;
+    else score -= 50;                                             // wrong artist
+  }
+  if (wantTitle) {
+    const wt = wantTitle.toLowerCase().trim();
+    if (title === wt) score += 50;
+    else if (title.includes(wt) || wt.includes(title)) score += 20;
+  }
+  if (item?.explicit === false && /\bclean\b/i.test(item?.name || "")) score -= 5;
+  return score;
+}
+
 // Spotify play, factored from the route handler so the multi-provider path
 // can reuse it without going through HTTP. Returns the same shape musicPlay
 // expects.
@@ -164,8 +208,34 @@ async function spotifyProviderPlay({ query, uri, title, artist }) {
   let item = null;
   if (!trackUri) {
     try {
-      const search = await spotifyFetch(`/search?type=track&limit=1&q=${encodeURIComponent(query)}`);
-      item = search.tracks?.items?.[0];
+      // Build the best Spotify search string we can. Field filters force
+      // matching against the title and artist columns rather than every
+      // indexed field, which is what causes karaoke versions to ever appear
+      // first. If we can't parse out an artist, fall back to a plain query.
+      const parsed = parseTrackQuery(query);
+      const wantTitle  = title  || parsed.title;
+      const wantArtist = artist || parsed.artist;
+      let q;
+      if (wantTitle && wantArtist) {
+        q = `track:"${wantTitle.replace(/"/g, '')}" artist:"${wantArtist.replace(/"/g, '')}"`;
+      } else {
+        q = parsed.raw;
+      }
+      const search = await spotifyFetch(`/search?type=track&limit=10&q=${encodeURIComponent(q)}`);
+      let items = search.tracks?.items || [];
+      // If the strict field-filtered query returned nothing, retry with the
+      // raw text — some tracks have apostrophes / parentheses that break the
+      // exact-string match Spotify does inside field filters.
+      if (!items.length && q !== parsed.raw) {
+        const fallback = await spotifyFetch(`/search?type=track&limit=10&q=${encodeURIComponent(parsed.raw)}`);
+        items = fallback.tracks?.items || [];
+      }
+      // Rank: kill karaoke/tribute, prefer exact artist match, tiebreak on
+      // Spotify popularity. ranked[0] is what we play.
+      const ranked = items
+        .map((it) => ({ item: it, score: rankSpotifyHit(it, wantTitle, wantArtist) }))
+        .sort((a, b) => b.score - a.score);
+      item = ranked[0]?.item || null;
       if (item) {
         trackUri = item.uri;
         const genres = await spotifyGenres([item]).catch(() => ({}));

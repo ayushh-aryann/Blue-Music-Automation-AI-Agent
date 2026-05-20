@@ -26,7 +26,7 @@ function compactBlueContext(context = {}) {
   };
 }
 
-function buildBlueSystemPrompt({ context = {}, memory = {}, allowTools = false, worldContext = "" } = {}) {
+function buildBlueSystemPrompt({ context = {}, memory = {}, allowTools = false, worldContext = "", profile = null } = {}) {
   const lines = [
     "You are Blue — Ayush's personal music agent and friendly conversational AI.",
     "Voice rules:",
@@ -49,6 +49,19 @@ function buildBlueSystemPrompt({ context = {}, memory = {}, allowTools = false, 
   if (context.mood) lines.push(`Current vibe reading: ${context.mood}.`);
   if (context.currentTrack?.title) {
     lines.push(`Currently playing: ${context.currentTrack.title}${context.currentTrack.artist ? ` by ${context.currentTrack.artist}` : ""}.`);
+  }
+
+  // Adaptive profile context — injected when available (non-null, has data)
+  if (profile && profile.dataPoints > 4) {
+    const parts = [];
+    if (profile.profileInsight) parts.push(profile.profileInsight);
+    if (profile.avoidArtists?.length)
+      parts.push(`Avoid suggesting: ${profile.avoidArtists.slice(0, 4).join(", ")}.`);
+    if (profile.topArtists?.length)
+      parts.push(`Favourite artists: ${profile.topArtists.slice(0, 4).join(", ")}.`);
+    if (profile.topGenres?.length)
+      parts.push(`Top genres: ${profile.topGenres.slice(0, 3).join(", ")}.`);
+    if (parts.length) lines.push("", `Listening profile: ${parts.join(" ")}`);
   }
   if (allowTools) {
     lines.push(

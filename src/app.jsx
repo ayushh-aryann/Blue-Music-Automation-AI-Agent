@@ -138,6 +138,33 @@ function pickRecommendation(mood, events) {
     .map((s)=>({...s, score:(s.mood===mood?60:15)+(fav[s.artist]||0)*8+Math.random()*6}))
     .sort((a,b)=>b.score-a.score)[0];
 }
+
+// Like pickRecommendation but the *currently playing* track drives the seed.
+// Genre match weighs heaviest, then mood, then a small artist-similarity bonus
+// (same artist but a different song reads as "more of this", not a loop). The
+// currently-playing track itself is excluded so we never recommend what's
+// already on. Random jitter keeps successive refreshes from feeling deterministic.
+function pickNextRecommendation(currentTrack, events, mood) {
+  const fav = countBy(events, "artist");
+  const curGenre  = currentTrack?.genre  || "";
+  const curArtist = currentTrack?.artist || "";
+  const curTitle  = currentTrack?.title  || "";
+  const curMood   = currentTrack?.mood   || mood;
+  const pool = window.BLUE_FALLBACK_CATALOG.filter(
+    (s) => !(s.title === curTitle && s.artist === curArtist),
+  );
+  return [...pool]
+    .map((s) => {
+      let score = 0;
+      if (curGenre  && s.genre  === curGenre)  score += 60;
+      if (curMood   && s.mood   === curMood)   score += 40;
+      if (curArtist && s.artist === curArtist) score += 18;   // related, not identical
+      score += (fav[s.artist] || 0) * 5;
+      score += Math.random() * 8;
+      return { ...s, score };
+    })
+    .sort((a, b) => b.score - a.score)[0];
+}
 function chooseBlueVoice(voices=[]) {
   const usable = voices.filter((v)=>/^en/i.test(v.lang||""));
   // Prefer neural / natural voices first — they handle contractions and pacing far better.
@@ -151,6 +178,12 @@ function chooseBlueVoice(voices=[]) {
 }
 function makeSpeechText(text="") {
   return String(text)
+    // Strip emojis and pictographic symbols before TTS — otherwise the browser
+    // synthesizer reads them aloud as their Unicode names ("face with tears of
+    // joy", "headphone", etc). \p{Extended_Pictographic} covers the full emoji
+    // range; ️ is the variation selector, ‍ the ZWJ used in compound
+    // emojis like 👨‍🚀.
+    .replace(/[\p{Extended_Pictographic}️‍]/gu, "")
     // Light, human-feeling punctuation pacing — no forced "Ayush," after every name
     .replace(/\bI am\b/g, "I'm")
     .replace(/\bI will\b/g, "I'll")
@@ -180,6 +213,12 @@ function App() {
   });
   React.useEffect(()=>{ try { localStorage.setItem(PROVIDER_KEY, activeProvider); } catch {} },[activeProvider]);
   const [youtubeVideo,   setYoutubeVideo]   = React.useState(null);   // { videoId, title, ... }
+  // Mirror youtubeVideo into a ref so the long-lived pollCurrent interval (set
+  // up once in a []-dep effect) can see the latest value without capturing a
+  // stale closure. Without this, the 4s Spotify "currently-playing" poll
+  // overwrites the YouTube track on the dashboard.
+  const youtubeVideoRef = React.useRef(null);
+  React.useEffect(()=>{ youtubeVideoRef.current = youtubeVideo; },[youtubeVideo]);
   const recRef          = React.useRef(null);
   const recDesireRef    = React.useRef(false);
   const speakingRef     = React.useRef(false);
@@ -193,6 +232,9 @@ function App() {
   const [lyrics,       setLyrics]       = React.useState({loading:false,synced:false,lines:[],plain:""});
   const lyricsCacheRef = React.useRef(new Map());
   const recommendation = React.useMemo(()=>pickRecommendation(mood,events),[mood,events]);
+  // Up-next picks from the currently-playing track's genre/mood signal so the
+  // Live Dashboard card always reflects "what would naturally follow this".
+  const nextUp = React.useMemo(()=>pickNextRecommendation(currentTrack,events,mood),[currentTrack,events,mood]);
 
   React.useEffect(()=>saveJson(STORAGE_KEY,events),[events]);
   // Persist messages but strip transient fields (_streaming, _id) so a refresh
@@ -253,6 +295,11 @@ function App() {
       try {
         const current = await fetch("/api/spotify/current").then(r=>r.ok?r.json():null);
         if (!current) return;
+        // If YouTube is the active source in Blue, ignore Spotify's
+        // "currently-playing" — the Spotify app reports whatever track was
+        // last loaded even when paused, which would otherwise clobber the
+        // YouTube track on the dashboard every 4 seconds.
+        if (youtubeVideoRef.current?.videoId) return;
         if (current.track) {
           const n = normalizeTrack({...current.track, durationMs: current.durationMs}, "Spotify");
           // Carry through fields the normalizer doesn't whitelist.
@@ -830,13 +877,14 @@ function App() {
         <Capabilities
           stats={stats} events={events} messages={messages}
           input={input} setInput={setInput} mood={mood} setMood={setMood}
-          recommendation={recommendation} currentTrack={currentTrack} bridge={bridge}
+          recommendation={recommendation} nextUp={nextUp} currentTrack={currentTrack} bridge={bridge}
           busy={busy} listening={listening} liveTranscript={liveTranscript}
           activeProvider={activeProvider} setActiveProvider={setActiveProvider}
           youtubeVideo={youtubeVideo} setYoutubeVideo={setYoutubeVideo}
           playback={playback} lyrics={lyrics}
           onSubmit={()=>sendToBlue()} onVoice={startVoice}
           onPlay={()=>playTrack(recommendation, activeProvider)} onMedia={mediaKey}
+          onPlayNext={(t)=>playTrack(t || nextUp, activeProvider)}
         />
       </main>
     </>
@@ -848,7 +896,7 @@ function Navbar({ bridge }) {
   const links = [["Home","#hero"],["Voice","#blue-agent"],["Automation","#automation"],["Dashboard","#dashboard"]];
   return (
     <nav data-hero="0" className="fixed left-0 right-0 top-4 z-50 flex items-center justify-between px-5 md:px-8 lg:px-16">
-      <a href="#hero" className="logo-link tilt-card" data-tilt="button" aria-label="Blue home"><BlueLogo /></a>
+      <a href="#hero" className="logo-link" aria-label="Blue home"><BlueLogo /></a>
       <div className="liquid-glass nav-pill hidden items-center rounded-full px-1.5 py-1.5 lg:flex">
         {links.map(([item,href])=>(
           <a key={item} href={href} className="alive-button rounded-full px-3 py-2 font-body text-sm font-medium text-white/90" data-tilt="button">{item}</a>
@@ -921,10 +969,10 @@ function StatCard({ icon, value, label }) {
 
 /* ── Capabilities ────────────────────────────────────────────────────────── */
 function Capabilities(props) {
+  const { currentTrack, nextUp, onPlayNext } = props;
   const cards = [
     { title:"AI Voice Chat",     icon:iconPaths.scenery, tags:["Mood Aware","Music Talk","LLM Ready","Voice First"],  body:"Blue listens to what you say, reasons about your taste, asks before it plays, and speaks back using the browser or an LLM bridge." },
     { title:"Playback Control",  icon:iconPaths.movie,   tags:["Spotify OAuth","Media Keys","Queue Next","Search Play"], body:"Once Spotify is connected, Blue can search tracks, start playback, and keep a local fallback for system media keys." },
-    { title:"Live Dashboard",    icon:iconPaths.light,   tags:["Real Plays","Mood Logs","Pie Charts","Top Artists"],  body:"Every track Blue sees or plays is stored locally, then reflected in mood, genre, artist, band, and song analytics." },
   ];
 
   return (
@@ -940,6 +988,12 @@ function Capabilities(props) {
 
         <div id="automation" className="mt-16 grid grid-cols-1 gap-6 md:grid-cols-3">
           {cards.map((card,i)=><CapabilityCard card={card} key={card.title} index={i} />)}
+          <LiveDashboardCard
+            index={2}
+            currentTrack={currentTrack}
+            nextUp={nextUp}
+            onPlay={onPlayNext}
+          />
         </div>
 
         <DashboardPanel {...props} />
@@ -948,9 +1002,108 @@ function Capabilities(props) {
   );
 }
 
+/* ── Live Dashboard capability card ────────────────────────────────────────
+   Replaces the static "Live Dashboard" card with a live, context-aware
+   "Up next" recommendation seeded off the currently-playing track. Bubble
+   field rises behind the text — pure CSS, no canvas, so it stays cheap.
+   The next-up block re-mounts on track change via a React key so the
+   nextFadeIn keyframe replays cleanly.
+   ─────────────────────────────────────────────────────────────────────── */
+function LiveDashboardCard({ index, currentTrack, nextUp, onPlay }) {
+  const cur = currentTrack;
+  const nx  = nextUp;
+  // Eleven bubbles, deterministic per-index so the layout is stable across renders
+  const bubbles = React.useMemo(() => Array.from({ length: 11 }, (_, i) => ({
+    size:  6 + ((i * 7) % 20),         // 6–26 px
+    left:  ((i * 17) + 5) % 96,        // 5%–96%
+    delay: ((i * 0.73) % 7).toFixed(2),
+    dur:   (10 + ((i * 1.7) % 7)).toFixed(2),
+  })), []);
+  return (
+    <article
+      data-reveal
+      className="liquid-glass capability-card live-dashboard-card relative flex min-h-[360px] flex-col overflow-hidden rounded-[1.25rem] p-6"
+      style={{transitionDelay:`${index*60}ms`}}
+    >
+      <div className="live-dashboard-card__bubbles" aria-hidden="true">
+        {bubbles.map((b, i) => (
+          <span
+            key={i}
+            className="live-dashboard-card__bubble"
+            style={{
+              width:  `${b.size}px`,
+              height: `${b.size}px`,
+              left:   `${b.left}%`,
+              animationDelay:    `${b.delay}s`,
+              animationDuration: `${b.dur}s`,
+            }}
+          />
+        ))}
+      </div>
+
+      {/* Now playing strip */}
+      <div className="relative z-10 flex items-start justify-between gap-3">
+        <span className="flex items-center gap-2">
+          <span className="live-dashboard-card__pulse" />
+          <span className="font-body text-[11px] uppercase tracking-[0.22em] text-white/60">
+            {cur ? "Now playing" : "Standing by"}
+          </span>
+        </span>
+        {cur?.mood && (
+          <span className="liquid-glass rounded-full px-2.5 py-1 font-body text-[10px] uppercase tracking-wider text-white/85">
+            {cur.mood}
+          </span>
+        )}
+      </div>
+      <div className="relative z-10 mt-2 min-w-0">
+        <p className="truncate font-heading text-base font-semibold leading-tight text-white">
+          {cur ? cur.title : "Nothing on yet"}
+        </p>
+        <p className="truncate font-body text-xs text-white/55">
+          {cur ? `${cur.artist}${cur.genre ? ` · ${cur.genre}` : ""}` : "Press play and Blue will start learning."}
+        </p>
+      </div>
+
+      <div className="live-dashboard-card__divider relative z-10 my-5" />
+
+      {/* Up next */}
+      <div className="relative z-10 mb-2 flex items-center gap-2">
+        <span className="live-dashboard-card__arrow" aria-hidden="true">↗</span>
+        <span className="font-body text-[11px] uppercase tracking-[0.22em] text-white/60">Up next</span>
+      </div>
+      <div key={`${nx?.title || ""}|${nx?.artist || ""}`} className="live-dashboard-card__next relative z-10 flex-1 min-w-0">
+        <h3 className="truncate font-heading text-3xl font-bold leading-[1.05] tracking-[-1px] text-white md:text-[2rem]">
+          {nx?.title || "Pick a mood"}
+        </h3>
+        <p className="mt-1 truncate font-body text-sm text-white/80">
+          {nx ? `${nx.artist}${nx.genre ? ` · ${nx.genre}` : ""}` : ""}
+        </p>
+        {nx?.mood && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <span className="liquid-glass rounded-full px-2.5 py-1 font-body text-[10px] uppercase tracking-wider text-white/85">{nx.mood}</span>
+            {nx.genre && (
+              <span className="liquid-glass rounded-full px-2.5 py-1 font-body text-[10px] uppercase tracking-wider text-white/85">{nx.genre}</span>
+            )}
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={()=>onPlay?.(nx)}
+        disabled={!nx}
+        className="live-dashboard-card__play relative z-10 mt-4 inline-flex items-center gap-2 self-start rounded-full px-4 py-2 font-body text-sm font-medium text-white"
+      >
+        <span aria-hidden="true">▶</span>
+        Play next
+      </button>
+    </article>
+  );
+}
+
 function CapabilityCard({ card, index }) {
   return (
-    <article data-reveal className="liquid-glass tilt-card capability-card flex min-h-[360px] flex-col rounded-[1.25rem] p-6" data-tilt="card" style={{transitionDelay:`${index*60}ms`}}>
+    <article data-reveal className="liquid-glass capability-card flex min-h-[360px] flex-col rounded-[1.25rem] p-6" style={{transitionDelay:`${index*60}ms`}}>
       <div className="flex items-start justify-between gap-4">
         <div className="liquid-glass flex h-11 w-11 shrink-0 items-center justify-center rounded-[0.75rem]">
           <MaterialIcon path={card.icon} />
@@ -996,7 +1149,7 @@ function DashboardPanel({ stats, events, messages, input, setInput, mood, setMoo
         <div data-reveal><DonutChart title="Mood listening split" data={stats.moodData} /></div>
         <div data-reveal><DonutChart title="Genre listening split" data={stats.genreData} /></div>
 
-        <div data-reveal className="liquid-glass tilt-card dashboard-card rounded-[1.25rem] p-5" data-tilt="card">
+        <div data-reveal className="liquid-glass dashboard-card rounded-[1.25rem] p-5">
           <p className="font-body text-sm text-white/70">Top signals</p>
           <div className="mt-4 grid gap-3 font-body text-white">
             <Signal label="Top song"   value={stats.topSong}   />
@@ -1006,7 +1159,7 @@ function DashboardPanel({ stats, events, messages, input, setInput, mood, setMoo
           </div>
         </div>
 
-        <div data-reveal className="liquid-glass tilt-card dashboard-card rounded-[1.25rem] p-5" data-tilt="card">
+        <div data-reveal className="liquid-glass dashboard-card rounded-[1.25rem] p-5">
           <p className="font-body text-sm text-white/70">Recent collection</p>
           <div className="mt-4 grid gap-3">
             {(events.length?events.slice(0,4):[recommendation]).map((e)=>(
@@ -1063,7 +1216,7 @@ function AgentConsole({ messages, input, setInput, mood, setMood, recommendation
   const anyStreaming = messages.some((m) => m && m._streaming);
 
   return (
-    <section id="blue-agent" data-reveal className="agent-shell relative overflow-hidden rounded-[1.25rem]" data-tilt="card">
+    <section id="blue-agent" data-reveal className="agent-shell relative overflow-hidden rounded-[1.25rem]">
       <div className="relative z-10 flex flex-1 flex-col p-5" style={{minHeight:700}}>
 
         {/* ── Header ── */}

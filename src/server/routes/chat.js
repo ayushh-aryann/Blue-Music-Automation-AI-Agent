@@ -29,6 +29,7 @@ const {
 const { runAgent } = require("../agent/loop");
 const { gatherContext, describeContext } = require("../agent/context");
 const { inferMood } = require("../lib/music-text");
+const { getCurrentContext: getProfile } = require("../agent/profile");
 
 // Tools mode is opt-in via env. We probe at first use and remember the result
 // for the rest of the process (one model, one capability).
@@ -240,11 +241,13 @@ async function runAgentPath({ message, history, context, fallback, send, res }) 
   const memory = readMemory();
   const compactContext = compactBlueContext(context);
   const worldCtx = await gatherContext().catch(() => null);
+  const profile  = getProfile();
   const systemPrompt = buildBlueSystemPrompt({
     context: compactContext,
     memory,
     allowTools: true,
     worldContext: describeContext(worldCtx),
+    profile,
   });
 
   const messages = [{ role: "system", content: systemPrompt }];
