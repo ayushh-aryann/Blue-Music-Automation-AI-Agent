@@ -124,11 +124,41 @@ function countBy(events, key) {
 function topOf(events, key) {
   return Object.entries(countBy(events, key)).sort((a,b)=>b[1]-a[1])[0]?.[0] || "Collecting";
 }
+
+// Top-signal helper: filters out the catch-all buckets ("Unknown", "Other",
+// empty string) so the dashboard never surfaces non-information as a top
+// signal. Returns {value, count, total} where total is the sum of all
+// non-filtered counts — used by the bar fill to show share of plays.
+const SIGNAL_EXCLUDE = new Set(["", "Unknown", "Other", "Collecting", null, undefined]);
+function topSignal(events, key) {
+  const counts = {};
+  for (const e of events) {
+    const v = e?.[key];
+    if (!v || SIGNAL_EXCLUDE.has(v)) continue;
+    counts[v] = (counts[v] || 0) + 1;
+  }
+  const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const total = ranked.reduce((s, [, n]) => s + n, 0);
+  if (!ranked.length) return { value: null, count: 0, total: 0 };
+  const [value, count] = ranked[0];
+  return { value, count, total };
+}
+// 5-minute dedup window. Without this, the 4s pollCurrent interval was
+// generating a fresh event every poll while a track played (because
+// /api/spotify/current returns no playedAt, so normalizeTrack stamps a new
+// timestamp each time). One song = ~75 events per 5 minutes. Bucketing by
+// title|artist|5min collapses all of that to one event while still letting
+// genuine replays after a break count separately. Also retroactively cleans
+// up old duplicate-stacked data the next time mergeEvents runs.
+const DEDUP_BUCKET_MS = 5 * 60 * 1000;
 function mergeEvents(existing, incoming) {
   const map = new Map();
   [...incoming, ...existing].forEach((e) => {
-    const s = e.playedAt ? new Date(e.playedAt).toISOString().slice(0,19) : "";
-    map.set(`${e.title}|${e.artist}|${s}`, e);
+    const bucket = e.playedAt ? Math.floor(new Date(e.playedAt).getTime() / DEDUP_BUCKET_MS) : 0;
+    const key = `${(e.title || "").toLowerCase()}|${(e.artist || "").toLowerCase()}|${bucket}`;
+    // First-seen wins (sorted: incoming before existing) — so newer fields
+    // like enriched genre/mood survive when a re-merge happens.
+    if (!map.has(key)) map.set(key, e);
   });
   return [...map.values()].sort((a,b)=>new Date(b.playedAt)-new Date(a.playedAt)).slice(0,300);
 }
@@ -219,6 +249,9 @@ function App() {
   // overwrites the YouTube track on the dashboard.
   const youtubeVideoRef = React.useRef(null);
   React.useEffect(()=>{ youtubeVideoRef.current = youtubeVideo; },[youtubeVideo]);
+  // Last title|artist key we inserted into events from the 4s Spotify poll.
+  // Cleared when playback stops so a resumed play counts as a new event.
+  const lastPollKeyRef = React.useRef("");
   const recRef          = React.useRef(null);
   const recDesireRef    = React.useRef(false);
   const speakingRef     = React.useRef(false);
@@ -313,9 +346,21 @@ function App() {
             isPlaying:  !!current.isPlaying,
             lastSyncAt: performance.now(),
           });
-          if (current.isPlaying) setEvents(old=>mergeEvents(old,[n]));
+          // Only insert when the track actually changes. Without this guard
+          // the same track gets re-added on every 4s poll (because
+          // /api/spotify/current returns no playedAt, so each normalizeTrack
+          // call stamps a fresh timestamp). mergeEvents' 5-min dedup would
+          // catch the existing instance, but skipping the work here is both
+          // cheaper and safer.
+          const key = `${(n.title || "").toLowerCase()}|${(n.artist || "").toLowerCase()}`;
+          if (current.isPlaying && key !== lastPollKeyRef.current) {
+            lastPollKeyRef.current = key;
+            setEvents(old=>mergeEvents(old,[n]));
+          }
+          if (!current.isPlaying) lastPollKeyRef.current = "";
         } else {
           setPlayback((p)=>({...p, isPlaying:false}));
+          lastPollKeyRef.current = "";
         }
       } catch {}
     };
@@ -384,10 +429,10 @@ function App() {
     const bucketed = events.map((e)=>({...e,genre:normalizeGenreClient(e.genre||"Unknown")}));
     return {
       plays,
-      topGenre:  topOf(bucketed,"genre"),
-      topSong:   topOf(events,"title"),
-      topArtist: topOf(events,"artist"),
-      topBand:   topOf(events,"band"),
+      topGenre:  topSignal(bucketed,"genre"),
+      topSong:   topSignal(events,"title"),
+      topArtist: topSignal(events,"artist"),
+      topBand:   topSignal(events,"band"),
       moodData:  countBy(events,"mood"),
       genreData: countBy(bucketed,"genre"),
       artistData:countBy(events,"artist"),
@@ -706,7 +751,7 @@ function App() {
 
     const context = {
       mood, recommendation, currentTrack,
-      topGenre: stats.topGenre, topArtist: stats.topArtist,
+      topGenre: stats.topGenre?.value || "", topArtist: stats.topArtist?.value || "",
       provider: activeProvider,
       recent: events.slice(0, 12),
     };
@@ -920,6 +965,7 @@ function App() {
           onSubmit={()=>sendToBlue()} onVoice={startVoice}
           onPlay={()=>playTrack(recommendation, activeProvider)} onMedia={mediaKey}
           onPlayNext={(t)=>playTrack(t || nextUp, activeProvider)}
+          onPlayAny={(t)=>playTrack(t, activeProvider)}
         />
       </main>
     </>
@@ -1159,7 +1205,7 @@ function CapabilityCard({ card, index }) {
 }
 
 /* ── Dashboard panel ─────────────────────────────────────────────────────── */
-function DashboardPanel({ stats, events, messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, liveTranscript, activeProvider, setActiveProvider, youtubeVideo, setYoutubeVideo, playback, lyrics, onSubmit, onVoice, onPlay, onMedia }) {
+function DashboardPanel({ stats, events, messages, input, setInput, mood, setMood, recommendation, currentTrack, bridge, busy, listening, liveTranscript, activeProvider, setActiveProvider, youtubeVideo, setYoutubeVideo, playback, lyrics, onSubmit, onVoice, onPlay, onMedia, onPlayAny }) {
   return (
     <div id="dashboard" className="dashboard-stage mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[1fr_460px]">
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -1184,15 +1230,7 @@ function DashboardPanel({ stats, events, messages, input, setInput, mood, setMoo
         <div data-reveal><DonutChart title="Mood listening split"  data={stats.moodData}  kind="mood"  activeName={mood} onSelect={setMood} /></div>
         <div data-reveal><DonutChart title="Genre listening split" data={stats.genreData} kind="genre" /></div>
 
-        <div data-reveal className="liquid-glass dashboard-card rounded-[1.25rem] p-5">
-          <p className="font-body text-sm text-white/70">Top signals</p>
-          <div className="mt-4 grid gap-3 font-body text-white">
-            <Signal label="Top song"   value={stats.topSong}   />
-            <Signal label="Top artist" value={stats.topArtist} />
-            <Signal label="Top band"   value={stats.topBand}   />
-            <Signal label="Top genre"  value={stats.topGenre}  />
-          </div>
-        </div>
+        <TopSignals stats={stats} events={events} onPlayAny={onPlayAny} />
 
         <div data-reveal className="liquid-glass dashboard-card rounded-[1.25rem] p-5">
           <p className="font-body text-sm text-white/70">Recent collection</p>
@@ -1221,11 +1259,100 @@ function DashboardPanel({ stats, events, messages, input, setInput, mood, setMoo
   );
 }
 
-function Signal({ label, value }) {
+/* ── Top signals card ─────────────────────────────────────────────────────
+   Stacked rows (label small + uppercase, value big) so long titles can't
+   collide with the label on narrow widths. Each row shows the play count
+   and an animated share-bar (this row's count / total of non-junk values).
+   Song/artist/band rows are click-to-play; genre is informational and
+   takes its accent color from the genre palette so the card stays
+   cohesive with the donut chart. Empty rows render as italic placeholders
+   with no bar — never "Unknown" or empty quotes leaking into the surface.
+   ─────────────────────────────────────────────────────────────────── */
+function TopSignals({ stats, events, onPlayAny }) {
+  const findMatch = (key, value) => {
+    if (!value) return null;
+    return events.find((e) => e?.[key] === value) || null;
+  };
+  const rows = [
+    {
+      key: "song", label: "Top song", icon: "♪",
+      data: stats.topSong,
+      color: "#FFE44D",
+      onPlay: () => {
+        const v = stats.topSong?.value;
+        const ev = findMatch("title", v);
+        if (v) onPlayAny?.({ title: v, artist: ev?.artist || "", query: `${v} ${ev?.artist || ""}`.trim() });
+      },
+    },
+    {
+      key: "artist", label: "Top artist", icon: "◉",
+      data: stats.topArtist,
+      color: "#7DB7FF",
+      onPlay: () => {
+        const v = stats.topArtist?.value;
+        const ev = findMatch("artist", v);
+        if (v && ev) onPlayAny?.({ title: ev.title, artist: v, query: `${ev.title} ${v}`.trim() });
+      },
+    },
+    {
+      key: "band", label: "Top band", icon: "◆",
+      data: stats.topBand,
+      color: "#C589E8",
+      onPlay: () => {
+        const v = stats.topBand?.value;
+        const ev = findMatch("band", v);
+        if (v && ev) onPlayAny?.({ title: ev.title, artist: ev.artist || v, query: `${ev.title} ${ev.artist || v}`.trim() });
+      },
+    },
+    {
+      key: "genre", label: "Top genre", icon: "✦",
+      data: stats.topGenre,
+      color: (window.BLUE_GENRE_COLORS?.[stats.topGenre?.value]) || "#7BD9A7",
+      onPlay: null, // informational
+    },
+  ];
+
   return (
-    <div className="signal-row flex items-center justify-between gap-4 rounded-full border border-white/10 px-4 py-2">
-      <span className="text-white/60">{label}</span>
-      <strong className="truncate text-right font-medium text-white">{value}</strong>
+    <div data-reveal className="liquid-glass dashboard-card top-signals rounded-[1.25rem] p-5">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="font-body text-sm text-white/70">Top signals</p>
+        <span className="font-body text-[11px] uppercase tracking-[0.15em] text-white/45 tabular-nums">
+          {stats.plays} play{stats.plays === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="mt-4 grid gap-2">
+        {rows.map((row) => {
+          const empty   = !row.data?.value;
+          const pct     = empty ? 0 : Math.min(100, Math.round((row.data.count / Math.max(1, row.data.total)) * 100));
+          const clickable = !!(row.onPlay && !empty);
+          const RowTag  = clickable ? "button" : "div";
+          const rowProps = clickable ? { type: "button", onClick: row.onPlay, title: `Play ${row.data.value}` } : {};
+          return (
+            <RowTag
+              {...rowProps}
+              key={row.key}
+              className={`top-signals__row ${empty ? "is-empty" : ""} ${clickable ? "is-clickable" : ""}`}
+              style={{ "--row-color": row.color }}
+            >
+              <div className="top-signals__head">
+                <span className="top-signals__icon" aria-hidden="true">{row.icon}</span>
+                <span className="top-signals__label">{row.label}</span>
+                {!empty && (
+                  <span className="top-signals__count">
+                    {row.data.count} play{row.data.count === 1 ? "" : "s"}
+                  </span>
+                )}
+              </div>
+              <div className="top-signals__value" key={row.data?.value || "empty"}>
+                {row.data?.value || "Collecting"}
+              </div>
+              <div className="top-signals__bar" aria-hidden="true">
+                <div className="top-signals__bar-fill" style={{ width: `${pct}%` }} />
+              </div>
+            </RowTag>
+          );
+        })}
+      </div>
     </div>
   );
 }

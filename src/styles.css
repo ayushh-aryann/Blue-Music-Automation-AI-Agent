@@ -1749,6 +1749,126 @@ html.smooth-scroll { scroll-behavior: smooth; }
   .donut-chart__num-name { animation: none; }
 }
 
+/* ── Top signals card ──────────────────────────────────────────────────────
+   Stacked rows: tiny uppercase label up top, big value below, share-bar
+   underneath. Long titles never collide with the label because they live on
+   their own line. Click-able rows lift on hover with a color-matched
+   shadow; the bar fill animates width changes over 700 ms. */
+.top-signals__row {
+  display: block;
+  width: 100%;
+  padding: 11px 13px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+  text-align: left;
+  font-family: "Space Grotesk", system-ui;
+  --row-color: #ffffff;
+  transition:
+    background 220ms ease,
+    border-color 220ms ease,
+    transform 220ms ease,
+    box-shadow 220ms ease;
+}
+
+.top-signals__row.is-clickable { cursor: pointer; }
+
+.top-signals__row.is-clickable:hover {
+  background: color-mix(in srgb, var(--row-color) 10%, rgba(255, 255, 255, 0.04));
+  border-color: color-mix(in srgb, var(--row-color) 30%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 12px 24px -14px color-mix(in srgb, var(--row-color) 55%, transparent);
+}
+
+.top-signals__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.top-signals__icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--row-color) 22%, rgba(255, 255, 255, 0.04));
+  color: var(--row-color);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.top-signals__label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.top-signals__count {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-variant-numeric: tabular-nums;
+}
+
+.top-signals__value {
+  margin-top: 7px;
+  font-family: "Syne", "Space Grotesk", system-ui;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: topSignalIn 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes topSignalIn {
+  0%   { opacity: 0; transform: translateY(4px); filter: blur(3px); }
+  100% { opacity: 1; transform: translateY(0);   filter: blur(0); }
+}
+
+.top-signals__row.is-empty .top-signals__value {
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 500;
+  font-style: italic;
+  font-family: "Space Grotesk", system-ui;
+  font-size: 14px;
+}
+
+.top-signals__bar {
+  margin-top: 9px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.top-signals__bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--row-color), color-mix(in srgb, var(--row-color) 45%, transparent));
+  border-radius: inherit;
+  transition: width 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.top-signals__row.is-empty .top-signals__bar-fill { width: 0 !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .top-signals__row,
+  .top-signals__value,
+  .top-signals__bar-fill { transition: none; animation: none; }
+}
+
 /* ── Live Dashboard capability card ──────────────────────────────────────
    Bubble field + pulsing now-playing dot + morphing up-next block. The
    bubbles use CSS-only animation (no JS rAF) so the cost is GPU compositing,
